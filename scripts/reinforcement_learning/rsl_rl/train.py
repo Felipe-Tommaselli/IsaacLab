@@ -104,6 +104,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 logger = logging.getLogger(__name__)
 
 # PLACEHOLDER: Extension template (do not remove this comment)
+from investigator import Investigator, InvestigatorCfg
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -216,8 +217,80 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
+    # -- MLflow run attach (when launched by isaacray's Ray Tune wrapper) --
+    # Ray's MLflowLoggerCallback creates the MLflow run lazily on the first
+    # report from the trial. We poll for it by run_name and resume it here so
+    # the Investigator (and any extra artifacts) land on the same run.
+    _mlflow_run_attached = False
+    _mlflow_uri = os.environ.get("ISAACRAY_MLFLOW_URI")
+    _mlflow_exp = os.environ.get("ISAACRAY_MLFLOW_EXPERIMENT")
+    _mlflow_run_name = os.environ.get("ISAACRAY_MLFLOW_RUN_NAME")
+    if _mlflow_uri and _mlflow_exp and _mlflow_run_name:
+        try:
+            import mlflow as _mlflow
+            _mlflow.set_tracking_uri(_mlflow_uri)
+            _client = _mlflow.tracking.MlflowClient(tracking_uri=_mlflow_uri)
+            _run_id = None
+            for _ in range(30):
+                _exp = _client.get_experiment_by_name(_mlflow_exp)
+                if _exp is not None:
+                    _runs = _client.search_runs(
+                        experiment_ids=[_exp.experiment_id],
+                        filter_string=f"attributes.run_name = '{_mlflow_run_name}'",
+                        max_results=1,
+                    )
+                    if _runs:
+                        _run_id = _runs[0].info.run_id
+                        break
+                time.sleep(2)
+            if _run_id is not None:
+                _mlflow.start_run(run_id=_run_id)
+                _mlflow_run_attached = True
+                print(f"[INFO] Attached to MLflow run {_run_id} for Investigator logging.")
+            else:
+                print("[WARNING] Could not locate MLflow run by name; Investigator MLflow logging disabled.")
+        except Exception as _e:
+            print(f"[WARNING] MLflow attach failed: {_e}")
+
+    # -- wandb run init (always-on, parallel to MLflow) --
+    _wandb_run_started = False
+    if os.environ.get("WANDB_API_KEY"):
+        try:
+            import wandb as _wandb
+            _wandb.init(
+                project=os.environ.get("WANDB_PROJECT") or None,
+                entity=os.environ.get("WANDB_ENTITY") or None,
+                name=os.environ.get("WANDB_NAME") or None,
+                group=os.environ.get("ISAACRAY_WANDB_GROUP") or None,
+                reinit=True,
+            )
+            _wandb_run_started = True
+            print(f"[INFO] wandb run started: {_wandb.run.url if _wandb.run else '?'}")
+        except Exception as _e:
+            print(f"[WARNING] wandb init failed: {_e}")
+
+    # -- Investigator setup (representation rank analysis) --
+    _inv_backend = os.environ.get("ISAACRAY_INVESTIGATOR_BACKEND", "multi")
+    investigator = Investigator(runner, cfg=InvestigatorCfg(backend=_inv_backend))
+    investigator.install(sort_fn=lambda obs: obs[:, 9:12].norm(dim=-1))
+
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+
+    investigator.generate_report()
+
+    if _mlflow_run_attached:
+        try:
+            import mlflow as _mlflow
+            _mlflow.end_run()
+        except Exception:
+            pass
+    if _wandb_run_started:
+        try:
+            import wandb as _wandb
+            _wandb.finish()
+        except Exception:
+            pass
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 
