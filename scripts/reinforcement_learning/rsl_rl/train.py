@@ -245,6 +245,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 time.sleep(2)
             if _run_id is not None:
                 _mlflow.start_run(run_id=_run_id)
+                _mlflow.set_tag("task", args_cli.task)
+                if os.environ.get("ISAACRAY_SWEEP_ID"):
+                    _mlflow.set_tag("sweep_id", os.environ.get("ISAACRAY_SWEEP_ID"))
                 _mlflow_run_attached = True
                 print(f"[INFO] Attached to MLflow run {_run_id} for Investigator logging.")
             else:
@@ -257,11 +260,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if os.environ.get("WANDB_API_KEY"):
         try:
             import wandb as _wandb
+            _wandb_tags = [args_cli.task]
+            if os.environ.get("ISAACRAY_SWEEP_ID"):
+                _wandb_tags.append(os.environ.get("ISAACRAY_SWEEP_ID"))
             _wandb.init(
                 project=os.environ.get("WANDB_PROJECT") or None,
                 entity=os.environ.get("WANDB_ENTITY") or None,
                 name=os.environ.get("WANDB_NAME") or None,
                 group=os.environ.get("ISAACRAY_WANDB_GROUP") or None,
+                tags=_wandb_tags,
                 reinit=True,
             )
             _wandb_run_started = True
