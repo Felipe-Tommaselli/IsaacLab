@@ -159,6 +159,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
+    # force wandb to save offline sync data in the mounted log_dir
+    os.makedirs(log_dir, exist_ok=True)
+    os.environ["WANDB_DIR"] = log_dir
+
+    # extract git commit hash for tracking
+    try:
+        import subprocess
+        git_commit = subprocess.check_output(
+            ["git", "-C", "/workspace/isaaclab", "rev-parse", "HEAD"]
+        ).decode("utf-8").strip()
+    except Exception:
+        git_commit = None
+
     # set the IO descriptors export flag if requested
     if isinstance(env_cfg, ManagerBasedRLEnvCfg):
         env_cfg.export_io_descriptors = args_cli.export_io_descriptors
@@ -248,6 +261,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _mlflow.set_tag("task", args_cli.task)
                 if os.environ.get("ISAACRAY_SWEEP_ID"):
                     _mlflow.set_tag("sweep_id", os.environ.get("ISAACRAY_SWEEP_ID"))
+                if git_commit:
+                    _mlflow.set_tag("git_commit", git_commit)
                 _mlflow_run_attached = True
                 print(f"[INFO] Attached to MLflow run {_run_id} for Investigator logging.")
             else:
@@ -272,6 +287,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 reinit=True,
             )
             _wandb_run_started = True
+            if git_commit:
+                _wandb.config.update({"git_commit": git_commit})
             print(f"[INFO] wandb run started: {_wandb.run.url if _wandb.run else '?'}")
         except Exception as _e:
             print(f"[WARNING] wandb init failed: {_e}")
