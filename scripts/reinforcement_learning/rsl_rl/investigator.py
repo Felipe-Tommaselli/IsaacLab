@@ -16,6 +16,7 @@ Designed for rsl_rl with IsaacLab. Actor/Critic accessed via runner.alg.policy.a
 from __future__ import annotations
 
 import json
+import math
 import warnings
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -214,14 +215,13 @@ def _to_scalar(v) -> float | None:
     """
     if v is None:
         return None
-    if isinstance(v, bool):
-        return float(v)
-    if isinstance(v, (int, float)):
-        return float(v)
+    scalar = _normalize_scalar(v)
+    if scalar is not None:
+        return scalar
     if isinstance(v, torch.Tensor):
         if v.numel() == 0:
             return None
-        return float(v.float().mean().item())
+        return _normalize_scalar(v.float().mean())
     # deque, list, tuple
     try:
         seq = list(v)
@@ -230,9 +230,51 @@ def _to_scalar(v) -> float | None:
     if not seq:
         return None
     try:
-        return float(np.mean([float(x) for x in seq]))
+        return _normalize_scalar(np.mean([float(x) for x in seq]))
     except (TypeError, ValueError):
         return None
+
+
+@dataclass(frozen=True)
+class _MediaMetric:
+    """Marker for backend media objects that should not enter scalar history."""
+
+    value: object
+
+
+def _normalize_scalar(value) -> float | None:
+    """Return a finite Python float for scalar metric values, otherwise None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        scalar = float(value)
+    elif isinstance(value, np.generic):
+        scalar = float(value.item())
+    elif isinstance(value, torch.Tensor):
+        if value.ndim != 0:
+            return None
+        scalar = float(value.detach().cpu().item())
+    else:
+        return None
+    return scalar if math.isfinite(scalar) else None
+
+
+def _split_metric_payload(metrics: dict) -> tuple[dict[str, float], dict]:
+    """Separate finite scalars from explicitly marked media objects."""
+    scalars = {}
+    media = {}
+    for key, value in metrics.items():
+        scalar = _normalize_scalar(value)
+        if scalar is not None:
+            scalars[key] = scalar
+        elif isinstance(value, _MediaMetric):
+            media[key] = value.value
+    return scalars, media
+
+
+def _coerce_scalar_payload(payload: dict) -> dict[str, float]:
+    return {k: scalar for k, v in payload.items()
+            if (scalar := _normalize_scalar(v)) is not None}
 
 
 # ===================================================================
@@ -249,30 +291,48 @@ def _make_histogram_fig(arr, name: str, bins: int = 64):
 
 
 class _WandbBackend:
-    """1:1 wrapper of the original wandb call shape — preserves prior behavior bit-for-bit."""
+    """W&B adapter with scalar and media payloads logged separately."""
 
     def __init__(self, cfg):
         self.cfg = cfg
+        self._metrics_defined = False
 
     def is_active(self) -> bool:
         return _WANDB_AVAILABLE and wandb.run is not None
 
+    def _define_metrics(self):
+        if self._metrics_defined or not self.is_active():
+            return
+        try:
+            wandb.define_metric("train_iteration")
+            wandb.define_metric("investigator/*",
+                                step_metric="train_iteration")
+            self._metrics_defined = True
+        except Exception as e:
+            warnings.warn(f"[Investigator] wandb metric definition failed: {e}")
+
     def log_params(self, d: dict):
+        self._define_metrics()
         wandb.config.update({"investigator": d}, allow_val_change=True)
 
     def add_histogram(self, metrics: dict, name: str, arr, iteration: int):
-        metrics[name] = wandb.Histogram(np.asarray(arr))
+        metrics[name] = _MediaMetric(wandb.Histogram(np.asarray(arr)))
 
     def add_image(self, metrics: dict, name: str, fig, iteration: int,
                   subdir: str = "plots"):
-        metrics[name] = wandb.Image(fig)
+        metrics[name] = _MediaMetric(wandb.Image(fig))
 
-    def flush(self, payload: dict, iteration: int):
-        # Mirrors original: scalars + wandb.Histogram/Image share one log call.
-        wandb.log({**payload, "train_iteration": iteration}, step=iteration)
+    def flush(self, scalars: dict, media: dict, iteration: int):
+        self._define_metrics()
+        scalar_payload = _coerce_scalar_payload(scalars)
+        if scalar_payload:
+            wandb.log({**scalar_payload, "train_iteration": iteration},
+                      step=iteration)
+        if media:
+            wandb.log({**media, "train_iteration": iteration}, step=iteration)
 
     def log_summary(self, summary: dict):
-        wandb.run.summary.update(summary)
+        wandb.run.summary.update(_coerce_scalar_payload(summary))
 
     def log_artifacts(self, log_dir, name: str):
         art = wandb.Artifact(name, type="analysis")
@@ -303,15 +363,14 @@ class _MlflowBackend:
         safe = name.replace("/", "_")
         mlflow.log_figure(fig, f"{subdir}/{safe}_step_{iteration}.png")
 
-    def flush(self, payload: dict, iteration: int):
-        scalars = {k: v for k, v in payload.items() if isinstance(v, (int, float))}
+    def flush(self, scalars: dict, media: dict, iteration: int):
+        scalars = _coerce_scalar_payload(scalars)
         if scalars:
             mlflow.log_metrics({**scalars, "train_iteration": float(iteration)},
                                step=iteration)
 
     def log_summary(self, summary: dict):
-        flat = {k: float(v) for k, v in summary.items()
-                if isinstance(v, (int, float, bool))}
+        flat = _coerce_scalar_payload(summary)
         if flat:
             mlflow.log_metrics(flat)
 
@@ -349,9 +408,9 @@ class _MultiBackend:
         for b in self._active():
             b.add_image(metrics, name, fig, iteration, subdir=subdir)
 
-    def flush(self, payload: dict, iteration: int):
+    def flush(self, scalars: dict, media: dict, iteration: int):
         for b in self._active():
-            b.flush(payload, iteration)
+            b.flush(scalars, media, iteration)
 
     def log_summary(self, summary: dict):
         for b in self._active():
@@ -400,6 +459,9 @@ class Investigator:
         self._history: dict[str, list] = {}
         self._installed = False
         self._backend = None
+        self._num_learning_iterations: int | None = None
+        self._half_dumped = False
+        self._scalar_writer = None
 
     # ---------------------------------------------------------
     # Installation
@@ -464,6 +526,8 @@ class Investigator:
         @wraps(original_learn)
         def patched_learn(num_learning_iterations: int,
                           init_at_random_ep_len: bool = False):
+            investigator._num_learning_iterations = num_learning_iterations
+            investigator._half_dumped = False
             # rsl_rl >= 5.0: logging goes through runner.logger.log(); no runner.log()
             logger = getattr(runner, "logger", None)
             if logger is not None and not hasattr(runner, "log"):
@@ -546,6 +610,13 @@ class Investigator:
         if iteration % cfg.checkpoint_interval == 0:
             self._compute_checkpoint_metrics(iteration)
             self._dump_history()
+        # Dump history at halfway point
+        if (self._num_learning_iterations is not None and
+            not self._half_dumped and
+            iteration >= self._num_learning_iterations / 2):
+            self._dump_history()
+            self._half_dumped = True
+            print(f"[Investigator] Halfway checkpoint dumped at iteration {iteration}")
 
     # ---------------------------------------------------------
     # Extra scalars scraped from rsl_rl's learn() locals
@@ -658,7 +729,7 @@ class Investigator:
 
         dead = [v for _, v in self._history.get(
             "investigator/actor/dead_neuron_frac", [])]
-        summary["investigator/collapse_detected"] = any(v > 0.5 for v in dead)
+        summary["investigator/collapse_detected"] = float(any(v > 0.5 for v in dead))
         self._backend.log_summary(summary)
 
     # ---------------------------------------------------------
@@ -1080,15 +1151,54 @@ class Investigator:
     # Logging
     # ---------------------------------------------------------
 
+    def _get_scalar_writer(self):
+        if self._scalar_writer is not None:
+            return self._scalar_writer
+
+        for owner in (self.runner, getattr(self.runner, "logger", None)):
+            if owner is None:
+                continue
+            if hasattr(owner, "add_scalar"):
+                self._scalar_writer = owner
+                return self._scalar_writer
+            for attr in (
+                "writer",
+                "summary_writer",
+                "tb_writer",
+                "tensorboard_writer",
+            ):
+                writer = getattr(owner, attr, None)
+                if hasattr(writer, "add_scalar"):
+                    self._scalar_writer = writer
+                    return self._scalar_writer
+        return None
+
+    def _mirror_scalars_to_tensorboard(self, scalars: dict[str, float],
+                                       iteration: int):
+        writer = self._get_scalar_writer()
+        if writer is None:
+            return
+        try:
+            for tag, value in scalars.items():
+                writer.add_scalar(tag, value, iteration)
+            if hasattr(writer, "flush"):
+                writer.flush()
+        except Exception as e:
+            warnings.warn(f"[Investigator] TensorBoard scalar mirror failed: {e}")
+
     def _log_metrics(self, metrics: dict, iteration: int):
-        # History tracking is backend-agnostic; non-scalars (figures/histograms) are skipped.
-        for k, v in metrics.items():
-            if isinstance(v, (int, float)):
-                self._history.setdefault(k, []).append((iteration, v))
+        scalars, media = _split_metric_payload(metrics)
+
+        # History tracking is backend-agnostic; non-scalars are skipped.
+        for k, v in scalars.items():
+            self._history.setdefault(k, []).append((iteration, v))
+
+        if scalars:
+            self._mirror_scalars_to_tensorboard(scalars, iteration)
 
         if self.cfg.wandb_log and self._backend is not None \
                 and self._backend.is_active():
-            self._backend.flush(metrics, iteration)
+            self._backend.flush(scalars, media, iteration)
 
     # ---------------------------------------------------------
     # PPO trust-region (optional — call from patched PPO.update)
