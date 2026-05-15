@@ -88,6 +88,27 @@ class _FactoredLinear(nn.Module):
     def extra_repr(self) -> str:
         return f"dim={self.dim}, num_factors={self.num_factors}, bias={self.bias is not None}"
 
+    @property
+    def in_features(self) -> int:
+        return self.dim
+
+    @property
+    def out_features(self) -> int:
+        return self.dim
+
+    @property
+    def weight(self) -> torch.Tensor:
+        """Collapsed effective weight W_e = W_k @ ... @ W_1.
+
+        Returns a tensor compatible with nn.Linear consumers (investigator
+        weight-rank analysis, weight heatmaps, etc.).  Routes through the
+        eval-mode cache when available to avoid redundant recomputation.
+        """
+        if not self.training and self._cache_valid:
+            return self._cached_weight
+        with torch.no_grad():
+            return self._collapsed_weight()
+
 
 class LinOpModel(MLPModel):
     """RSL-RL MLPModel with hidden square linear layers replaced by factored products.

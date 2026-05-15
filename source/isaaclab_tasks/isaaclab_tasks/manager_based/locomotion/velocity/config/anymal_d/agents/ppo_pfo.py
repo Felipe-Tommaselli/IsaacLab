@@ -39,6 +39,8 @@ import torch
 import torch.nn as nn
 from rsl_rl.algorithms.ppo import PPO
 
+from .rsl_rl_ppo_linop_cfg import _FactoredLinear
+
 
 # ---------------------------------------------------------------------------
 # Architecture-agnostic hook adapter
@@ -74,7 +76,8 @@ def _get_hook_targets(trunk: nn.Module) -> tuple[nn.Module, nn.Module]:
     # Vanilla MLP exposed as nn.Sequential — find the last hidden nn.Linear
     # (second-to-last Linear overall; the last Linear is the output head).
     if isinstance(trunk, nn.Sequential):
-        linears = [(i, m) for i, m in enumerate(trunk) if isinstance(m, nn.Linear)]
+        linears = [(i, m) for i, m in enumerate(trunk)
+                   if isinstance(m, (nn.Linear, _FactoredLinear))]
         if len(linears) >= 2:
             # Second-to-last Linear = last hidden Linear
             return trunk, linears[-2][1]

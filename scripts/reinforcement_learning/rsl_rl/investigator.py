@@ -56,6 +56,36 @@ def _gram_pattern(g_np, cmap=None):
     vmax = g.max() if g.max() > 0 else 1.0
     return g, None, (cmap or _CMAP_WY), 0.0, vmax
 
+
+_SUP_DIGITS = str.maketrans("0123456789", "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079")
+
+
+def _setup_sci_xaxis(ax, values):
+    """Configure x-axis with scientific notation: ticks as coefficients, exponent in label."""
+    from matplotlib.ticker import FuncFormatter
+    max_val = max(values) if values else 0
+    if max_val <= 0:
+        ax.set_xlabel("Total env steps")
+        return
+    exp = int(np.floor(np.log10(max_val)))
+    divisor = 10 ** exp
+    exp_str = str(exp).translate(_SUP_DIGITS)
+    ax.xaxis.set_major_formatter(FuncFormatter(
+        lambda x, pos: f"{x / divisor:.1f}"))
+    ax.set_xlabel(f"Total env steps (\u00d710{exp_str})")
+
+
+def _fmt_total_steps(total_steps: int | float) -> str:
+    """Format total env steps for subplot titles (e.g. '1.97\u00d710\u2078')."""
+    total_steps = int(total_steps)
+    if total_steps == 0:
+        return "step 0"
+    exp = int(np.floor(np.log10(abs(total_steps))))
+    coeff = total_steps / 10 ** exp
+    exp_str = str(exp).translate(_SUP_DIGITS)
+    return f"{coeff:.2f}\u00d710{exp_str} steps"
+
+
 # [WANDB INTEGRATION] soft-import; all wandb calls below are gated on _WANDB_AVAILABLE
 _WANDB_AVAILABLE = False
 try:
@@ -165,6 +195,12 @@ class InvestigatorCfg:
     # -- Thresholds --
     dead_neuron_threshold: float = 1e-1
     erank_eps: float = 1e-10
+
+    # -- Environment step aggregation (fallback; auto-detected at install) --
+    num_steps_per_env: int = 24
+    """Rollout horizon per env per iteration (fallback if auto-detect fails)."""
+    num_envs: int = 4096
+    """Number of parallel environments (fallback if auto-detect fails)."""
 
     # -- Scrape from rsl_rl's learn() locals for post-hoc comparison --
     # Scalars (float/int) go as-is. Deques/lists are reduced with mean.
@@ -304,9 +340,9 @@ class _WandbBackend:
         if self._metrics_defined or not self.is_active():
             return
         try:
-            wandb.define_metric("train_iteration")
+            wandb.define_metric("total_env_steps")
             wandb.define_metric("investigator/*",
-                                step_metric="train_iteration")
+                                step_metric="total_env_steps")
             self._metrics_defined = True
         except Exception as e:
             warnings.warn(f"[Investigator] wandb metric definition failed: {e}")
@@ -326,10 +362,9 @@ class _WandbBackend:
         self._define_metrics()
         scalar_payload = _coerce_scalar_payload(scalars)
         if scalar_payload:
-            wandb.log({**scalar_payload, "train_iteration": iteration},
-                      step=iteration)
+            wandb.log({**scalar_payload, "total_env_steps": iteration})
         if media:
-            wandb.log({**media, "train_iteration": iteration}, step=iteration)
+            wandb.log({**media, "total_env_steps": iteration})
 
     def log_summary(self, summary: dict):
         wandb.run.summary.update(_coerce_scalar_payload(summary))
@@ -366,7 +401,7 @@ class _MlflowBackend:
     def flush(self, scalars: dict, media: dict, iteration: int):
         scalars = _coerce_scalar_payload(scalars)
         if scalars:
-            mlflow.log_metrics({**scalars, "train_iteration": float(iteration)},
+            mlflow.log_metrics({**scalars, "total_env_steps": float(iteration)},
                                step=iteration)
 
     def log_summary(self, summary: dict):
@@ -425,11 +460,26 @@ class _MultiBackend:
 # Layer discovery
 # ===================================================================
 
-def _find_linear_layers(model: nn.Module) -> list[tuple[str, nn.Linear]]:
-    return [(n, m) for n, m in model.named_modules() if isinstance(m, nn.Linear)]
+def _is_linear_like(m: nn.Module) -> bool:
+    """True for nn.Linear and any drop-in replacement exposing a 2D .weight.
+
+    Catches _FactoredLinear (and future variants) without importing them.
+    Excludes nn.ParameterList, LayerNorm, BatchNorm, etc.
+    """
+    if isinstance(m, nn.Linear):
+        return True
+    w = getattr(m, "weight", None)
+    return (w is not None
+            and isinstance(w, torch.Tensor)
+            and w.ndim == 2
+            and not isinstance(m, (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d)))
 
 
-def _find_penultimate_linear(model: nn.Module) -> tuple[str, nn.Linear]:
+def _find_linear_layers(model: nn.Module) -> list[tuple[str, nn.Module]]:
+    return [(n, m) for n, m in model.named_modules() if _is_linear_like(m)]
+
+
+def _find_penultimate_linear(model: nn.Module) -> tuple[str, nn.Module]:
     linears = _find_linear_layers(model)
     if len(linears) < 2:
         raise ValueError(f"Need >= 2 Linear layers, found {len(linears)}.")
@@ -459,6 +509,7 @@ class Investigator:
         self._history: dict[str, list] = {}
         self._installed = False
         self._backend = None
+        self._step_scale: int = 1
         self._num_learning_iterations: int | None = None
         self._half_dumped = False
         self._scalar_writer = None
@@ -487,6 +538,16 @@ class Investigator:
         self._phase_fn = phase_fn
 
         runner = self.runner
+
+        # Auto-detect environment step aggregation parameters
+        try:
+            _nsteps = runner.cfg.get("num_steps_per_env", self.cfg.num_steps_per_env)
+            _nenvs = getattr(runner.env, "num_envs", self.cfg.num_envs)
+            self._step_scale = int(_nsteps) * int(_nenvs)
+        except Exception:
+            self._step_scale = self.cfg.num_steps_per_env * self.cfg.num_envs
+        print(f"[Investigator] Step scale: {self._step_scale} "
+              f"(num_steps_per_env \u00d7 num_envs)")
 
         # Output directory
         log_dir = getattr(runner, "log_dir", None) or "logs/investigator_default"
@@ -678,13 +739,25 @@ class Investigator:
         print(f"[Investigator] Done. History -> {history_path}")
 
     def _dump_history(self) -> Path:
-        """Write scalar history to disk without waiting for training to end."""
+        """Write scalar history to disk without waiting for training to end.
+
+        The JSON format includes a ``__version__`` key (currently ``2``) so that
+        ``_load_history`` can distinguish files written with total-env-step
+        x-values from legacy files that stored raw iteration counts.
+
+        Note: saved ``.pt`` artefact files (grams, spectra, Jacobians) still use
+        raw iteration numbers in their filenames for programmatic parsing.  The
+        conversion to total env steps happens at display time via
+        ``it * self._step_scale``.
+        """
         history_path = self._log_dir / "history.json"
         if not self._history:
             return history_path
 
         serializable = {k: [(it, float(v)) for it, v in vals]
                         for k, vals in self._history.items()}
+        serializable["__version__"] = 2
+        serializable["__step_scale__"] = self._step_scale
 
         tmp_history_path = history_path.with_suffix(".json.tmp")
         with open(tmp_history_path, "w") as f:
@@ -695,8 +768,10 @@ class Investigator:
         try:
             tmp_csv_path = csv_path.with_suffix(".csv.tmp")
             with open(tmp_csv_path, "w") as f:
-                f.write("metric,iteration,value\n")
+                f.write("metric,total_env_steps,value\n")
                 for k, vals in serializable.items():
+                    if k.startswith("__"):
+                        continue
                     for it, v in vals:
                         f.write(f"{k},{it},{v}\n")
             tmp_csv_path.replace(csv_path)
@@ -800,8 +875,8 @@ class Investigator:
         with torch.no_grad():
             for label, model in [("actor", self._get_actor())]:
                 for i, (name, layer) in enumerate(_find_linear_layers(model)):
-                    _, S, _ = torch.linalg.svd(
-                        layer.weight.data, full_matrices=False)
+                    W = layer.weight
+                    _, S, _ = torch.linalg.svd(W, full_matrices=False)
                     er = effective_rank(S, self.cfg.erank_eps)
                     metrics[f"investigator/weights/{label}/layer_{i}_erank"] = er
 
@@ -816,6 +891,19 @@ class Investigator:
                         self._backend.add_histogram(
                             metrics, f"investigator/spectra/weight_{label}_L{i}",
                             S.cpu().numpy(), iteration)
+
+                    # Per-factor spectra for LinOP layers (Huh et al. Fig 14)
+                    if hasattr(layer, "factors"):
+                        for j, factor in enumerate(layer.factors):
+                            _, S_f, _ = torch.linalg.svd(
+                                factor.detach(), full_matrices=False)
+                            metrics[f"investigator/weights/{label}/layer_{i}_factor_{j}_erank"] = (
+                                effective_rank(S_f, self.cfg.erank_eps)
+                            )
+                            if self.cfg.save_spectra:
+                                torch.save(
+                                    S_f.cpu(),
+                                    self._log_dir / f"spectra/weight_{label}_L{i}_F{j}_sv_{iteration}.pt")
 
         self._log_metrics(metrics, iteration)
 
@@ -974,7 +1062,7 @@ class Investigator:
         if self.cfg.save_spectra:
             self._save_weight_spectra(actor, iteration, "actor")
             # Backup raw weight matrices for post-hoc weight-heatmap reconstruction
-            weights = {f"layer_{i}_{name}": layer.weight.data.cpu()
+            weights = {f"layer_{i}_{name}": layer.weight.cpu()
                        for i, (name, layer) in enumerate(_find_linear_layers(actor))}
             torch.save(weights, self._log_dir / f"spectra/actor_weights_{iteration}.pt")
 
@@ -1115,8 +1203,8 @@ class Investigator:
         spectra = {}
         with torch.no_grad():
             for i, (name, layer) in enumerate(_find_linear_layers(model)):
-                _, S, _ = torch.linalg.svd(
-                    layer.weight.data, full_matrices=False)
+                W = layer.weight
+                _, S, _ = torch.linalg.svd(W, full_matrices=False)
                 spectra[f"layer_{i}_{name}"] = S.cpu()
         torch.save(
             spectra,
@@ -1188,17 +1276,18 @@ class Investigator:
 
     def _log_metrics(self, metrics: dict, iteration: int):
         scalars, media = _split_metric_payload(metrics)
+        total_steps = iteration * self._step_scale
 
         # History tracking is backend-agnostic; non-scalars are skipped.
         for k, v in scalars.items():
-            self._history.setdefault(k, []).append((iteration, v))
+            self._history.setdefault(k, []).append((total_steps, v))
 
         if scalars:
-            self._mirror_scalars_to_tensorboard(scalars, iteration)
+            self._mirror_scalars_to_tensorboard(scalars, total_steps)
 
         if self.cfg.wandb_log and self._backend is not None \
                 and self._backend.is_active():
-            self._backend.flush(scalars, media, iteration)
+            self._backend.flush(scalars, media, total_steps)
 
     # ---------------------------------------------------------
     # PPO trust-region (optional — call from patched PPO.update)
@@ -1271,7 +1360,7 @@ class Investigator:
                         vmin=vmin_p, vmax=vmax_p,
                         aspect="equal", interpolation="nearest")
         ax.set_title(
-            f"Gram (pattern) -- iter {iteration}", fontsize=8)
+            f"Gram (pattern) -- {_fmt_total_steps(iteration * self._step_scale)}", fontsize=8)
         ax.set_xlabel("obs index")
         ax.set_ylabel("obs index")
         div1 = make_axes_locatable(ax)
@@ -1312,7 +1401,7 @@ class Investigator:
             norm = None
         im = ax.imshow(feat_np, cmap=_CMAP_BWY, norm=norm,
                    aspect="auto", interpolation="nearest")
-        ax.set_title(f"Feature Activations -- iter {iteration}  |  "
+        ax.set_title(f"Feature Activations -- {_fmt_total_steps(iteration * self._step_scale)}  |  "
                      f"erank = {erank_val:.1f}", fontsize=9)
         ax.set_xlabel("neuron (sorted by top SV)")
         ax.set_ylabel("obs index")
@@ -1370,7 +1459,7 @@ class Investigator:
         for i in range(3, a_dim, 3):
             ax.axhline(i - 0.5, color="k", linewidth=0.5, alpha=0.4)
 
-        ax.set_title(f"Jacobian -- iter {iteration}  |  "
+        ax.set_title(f"Jacobian -- {_fmt_total_steps(iteration * self._step_scale)}  |  "
                      f"erank = {erank_val:.1f}", fontsize=9)
         div = make_axes_locatable(ax)
         fig.colorbar(im, cax=div.append_axes("right", size="3%", pad=0.05))
@@ -1417,7 +1506,7 @@ class Investigator:
         for i in range(3, a_dim, 3):
             ax.axhline(i - 0.5, color="w", linewidth=0.5, alpha=0.4)
 
-        ax.set_title(f"Jacobian Std -- iter {iteration}", fontsize=9)
+        ax.set_title(f"Jacobian Std -- {_fmt_total_steps(iteration * self._step_scale)}", fontsize=9)
         div = make_axes_locatable(ax)
         fig.colorbar(im, cax=div.append_axes("right", size="3%", pad=0.05))
         fig.tight_layout()
@@ -1439,25 +1528,25 @@ class Investigator:
 
         with torch.no_grad():
             for i, (name, layer) in enumerate(layers):
-                W = layer.weight.data.cpu().numpy()
-                _, S, _ = torch.linalg.svd(
-                    layer.weight.data, full_matrices=False)
+                W_t = layer.weight
+                W_np = W_t.cpu().numpy()
+                _, S, _ = torch.linalg.svd(W_t, full_matrices=False)
                 er = effective_rank(S, self.cfg.erank_eps)
 
                 ax = axes[0, i]
-                vabs = max(abs(W.min()), abs(W.max()))
+                vabs = max(abs(W_np.min()), abs(W_np.max()))
                 if vabs > 0:
                     norm = TwoSlopeNorm(vmin=-vabs, vcenter=0, vmax=vabs)
                 else:
                     norm = None
-                im = ax.imshow(W, cmap=_CMAP_BWY, norm=norm, aspect="auto",
+                im = ax.imshow(W_np, cmap=_CMAP_BWY, norm=norm, aspect="auto",
                                interpolation="nearest")
-                ax.set_title(f"L{i} ({W.shape[0]}x{W.shape[1]})\n"
+                ax.set_title(f"L{i} ({W_np.shape[0]}x{W_np.shape[1]})\n"
                              f"er={er:.1f}", fontsize=7)
                 ax.tick_params(labelsize=5)
                 fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-        fig.suptitle(f"Weight Matrices -- iter {iteration}", fontsize=9)
+        fig.suptitle(f"Weight Matrices -- {_fmt_total_steps(iteration * self._step_scale)}", fontsize=9)
         fig.tight_layout()
         return fig
 
@@ -1488,7 +1577,16 @@ class Investigator:
         p = inv_dir / "history.json"
         if p.exists():
             with open(p) as f:
-                return json.load(f)
+                raw = json.load(f)
+            version = raw.pop("__version__", 1)
+            raw.pop("__step_scale__", None)
+            if version < 2:
+                warnings.warn(
+                    f"[Investigator] {p} uses legacy format (raw iterations). "
+                    f"X-axis values will not reflect total env steps. "
+                    f"Re-run training to generate a v2 history file."
+                )
+            return raw
         return self._history
 
     def _plot_rank_evolution(self, all_h, out):
@@ -1500,12 +1598,14 @@ class Investigator:
         fig, axes = plt.subplots(1, len(keys),
                                  figsize=self.cfg.figsize_evolution)
         for ax, (k, t) in zip(axes, keys):
+            all_its = []
             for label, h in all_h:
                 if k in h:
                     its, vs = zip(*h[k])
                     ax.plot(its, vs, label=label, linewidth=1.5)
+                    all_its.extend(its)
             ax.set_title(t, fontsize=9)
-            ax.set_xlabel("iteration")
+            _setup_sci_xaxis(ax, all_its)
             ax.set_ylabel("effective rank")
             ax.legend(fontsize=7)
             ax.grid(True, alpha=0.3)
@@ -1547,7 +1647,7 @@ class Investigator:
             norm, cmap = _gram_colornorm(g_np)
             ax_g.imshow(g_np, cmap=cmap, norm=norm,
                         aspect="equal", interpolation="nearest")
-            ax_g.set_title(f"iter {it}\ner={er:.1f}", fontsize=8)
+            ax_g.set_title(f"{_fmt_total_steps(it * self._step_scale)}\ner={er:.1f}", fontsize=8)
             ax_g.tick_params(labelsize=6)
 
             # Row 1: pattern view (white->yellow)
@@ -1604,7 +1704,7 @@ class Investigator:
             ax = axes[0, col]
             ax.imshow(feat_np, cmap="viridis", aspect="auto",
                       interpolation="nearest")
-            ax.set_title(f"iter {it}\ner={er:.1f}", fontsize=8)
+            ax.set_title(f"{_fmt_total_steps(it * self._step_scale)}\ner={er:.1f}", fontsize=8)
             ax.tick_params(labelsize=6)
             if col == 0:
                 ax.set_ylabel("obs index", fontsize=7)
@@ -1643,7 +1743,7 @@ class Investigator:
                 norm = None
             ax.imshow(J_np, cmap="RdBu_r", norm=norm, aspect="auto",
                       interpolation="nearest")
-            ax.set_title(f"iter {it}\ner={er:.1f}", fontsize=8)
+            ax.set_title(f"{_fmt_total_steps(it * self._step_scale)}\ner={er:.1f}", fontsize=8)
 
             row_labels = ACTION_LABELS[:a_dim] if a_dim <= len(ACTION_LABELS) \
                 else [f"a{i}" for i in range(a_dim)]
@@ -1693,7 +1793,7 @@ class Investigator:
                                 alpha=0.1, color="#2E86AB")
                 er = effective_rank(torch.tensor(S), self.cfg.erank_eps)
                 if row == 0:
-                    ax.set_title(f"iter {it}", fontsize=8)
+                    ax.set_title(f"{_fmt_total_steps(it * self._step_scale)}", fontsize=8)
                 if col == 0:
                     ax.set_ylabel(ln.split("_", 2)[-1][:20], fontsize=7)
                 ax.text(0.95, 0.95, f"er={er:.1f}", transform=ax.transAxes,
@@ -1715,12 +1815,14 @@ class Investigator:
         fig, axes = plt.subplots(1, len(keys),
                                  figsize=(len(keys) * 4.5, 3.5))
         for ax, (k, t) in zip(axes, keys):
+            all_its = []
             for label, h in all_h:
                 if k in h:
                     its, vs = zip(*h[k])
                     ax.plot(its, vs, label=label, linewidth=1.2)
+                    all_its.extend(its)
             ax.set_title(t, fontsize=9)
-            ax.set_xlabel("iteration")
+            _setup_sci_xaxis(ax, all_its)
             ax.legend(fontsize=7)
             ax.grid(True, alpha=0.3)
         fig.suptitle("Collapse Indicators", fontsize=11, y=1.02)
@@ -1759,12 +1861,14 @@ def compare_experiments(
 
     # Feature erank comparison
     fig, ax = plt.subplots(figsize=(10, 5))
+    all_its = []
     for label, h in all_h:
         k = "investigator/actor/feature_erank"
         if k in h:
             its, vs = zip(*h[k])
             ax.plot(its, vs, label=label, linewidth=1.5)
-    ax.set_xlabel("iteration")
+            all_its.extend(its)
+    _setup_sci_xaxis(ax, all_its)
     ax.set_ylabel("effective rank")
     ax.set_title("Actor Feature erank -- Cross-Architecture")
     ax.legend()
@@ -1794,7 +1898,7 @@ def compare_experiments(
         norm_v, cmap = _gram_colornorm(g_np)
         ax_g.imshow(g_np, cmap=cmap, norm=norm_v,
                     aspect="equal", interpolation="nearest")
-        ax_g.set_title(f"{label}\niter {it} | er={er:.1f}", fontsize=9)
+        ax_g.set_title(f"{label}\ner={er:.1f}", fontsize=9)
 
         ax_s = axes[1, col]
         Sn = (Sg / Sg.sum()).numpy()
@@ -1837,6 +1941,7 @@ if __name__ == "__main__":
         inv._log_dir = Path(args.log_dir)
         inv._history = {}
         inv._sort_indices = None
+        inv._step_scale = inv.cfg.num_steps_per_env * inv.cfg.num_envs
         obs_p = inv._log_dir / "fixed_eval_obs.pt"
         if obs_p.exists():
             inv._fixed_eval_obs = torch.load(obs_p, weights_only=True)
