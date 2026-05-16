@@ -1555,7 +1555,15 @@ class Investigator:
     # ===================================================================
 
     def generate_report(self, compare_dirs: list[str | Path] | None = None):
-        """Generate matplotlib plots from saved data."""
+        """Generate matplotlib plots from saved data.
+
+        Each plot is wrapped in try/except so a failure in one (e.g. drifted
+        layer names, missing files, matplotlib weirdness) doesn't kill the
+        whole report — and, critically, doesn't propagate up to crash the
+        training subprocess and mark the trial FAILED in Ray/MLflow.  The
+        training itself has already finished by the time we get here; the
+        worst a report bug should do is print a warning.
+        """
 
         plots_dir = self._log_dir / "plots"
         history = self._load_history(self._log_dir)
@@ -1565,12 +1573,19 @@ class Investigator:
                 all_h.append((Path(d).parent.name,
                               self._load_history(Path(d))))
 
-        self._plot_rank_evolution(all_h, plots_dir)
-        self._plot_gram_evolution_grid(plots_dir)
-        self._plot_feature_heatmap_grid(plots_dir)
-        self._plot_jacobian_heatmap_grid(plots_dir)
-        self._plot_spectral_evolution(plots_dir)
-        self._plot_collapse_indicators(all_h, plots_dir)
+        for fn, args in (
+            (self._plot_rank_evolution,        (all_h, plots_dir)),
+            (self._plot_gram_evolution_grid,   (plots_dir,)),
+            (self._plot_feature_heatmap_grid,  (plots_dir,)),
+            (self._plot_jacobian_heatmap_grid, (plots_dir,)),
+            (self._plot_spectral_evolution,    (plots_dir,)),
+            (self._plot_collapse_indicators,   (all_h, plots_dir)),
+        ):
+            try:
+                fn(*args)
+            except Exception as e:
+                warnings.warn(f"[Investigator] {fn.__name__} failed: {e}")
+
         print(f"[Investigator] Report -> {plots_dir}")
 
     def _load_history(self, inv_dir: Path) -> dict:
@@ -1775,19 +1790,34 @@ class Investigator:
         idxs = np.linspace(0, len(sfiles) - 1, n, dtype=int)
         sel = [sfiles[i] for i in idxs]
 
-        first = torch.load(sel[0], weights_only=True)
-        lnames = list(first.keys())
+        # Build lnames from the *union* of layers across all selected
+        # snapshots — not just the first.  For some architectures (SimBa
+        # in particular) the per-snapshot layer set drifts over training
+        # (e.g. layer_0_embed appears only in some checkpoints).  Indexing
+        # blindly with the first-snapshot's keys would raise KeyError and
+        # kill the trial AFTER training has already finished — see the
+        # 'anymal_flat_v1' anymal/simba runs at iter ~290 / 6:03 elapsed.
+        snapshots = [torch.load(sf, weights_only=True) for sf in sel]
+        seen: dict[str, None] = {}
+        for sp in snapshots:
+            for k in sp.keys():
+                seen.setdefault(k, None)
+        lnames = list(seen.keys())
         nl = len(lnames)
 
         fig, axes = plt.subplots(nl, n, figsize=(n * 3, nl * 2.2),
                                  squeeze=False)
-        for col, sf in enumerate(sel):
-            sp = torch.load(sf, weights_only=True)
+        for col, (sf, sp) in enumerate(zip(sel, snapshots)):
             it = int(sf.stem.split("_")[-1])
             for row, ln in enumerate(lnames):
+                ax = axes[row, col]
+                if ln not in sp:
+                    # This snapshot doesn't have the layer — leave the cell
+                    # blank and move on.  Otherwise we'd crash the report.
+                    ax.set_axis_off()
+                    continue
                 S = sp[ln].numpy()
                 S_n = S / S.max()
-                ax = axes[row, col]
                 ax.semilogy(S_n, linewidth=1.0, color="#2E86AB")
                 ax.fill_between(range(len(S_n)), S_n,
                                 alpha=0.1, color="#2E86AB")
