@@ -662,6 +662,13 @@ class Investigator:
 
     def _on_iteration(self, iteration: int, locs: dict | None = None):
         cfg = self.cfg
+        # Mirror env-step count to RSL-RL's TensorBoard writer every iteration
+        # so downstream consumers (e.g. Ray's MLflowLoggerCallback via
+        # load_tensorboard_logs) can use it as the global step.
+        total_steps = int(iteration) * int(self._step_scale)
+        self._mirror_scalars_to_tensorboard(
+            {"total_env_steps": float(total_steps)}, total_steps
+        )
         if locs is not None:
             self._log_locs_scalars(iteration, locs)
         if iteration % cfg.log_interval == 0:
