@@ -211,6 +211,8 @@ class InvestigatorCfg:
         "loss_dict",         # dict: surrogate_loss, value_loss, entropy, ...
         "collection_time",
         "learn_time",
+        "ep_infos",          # list of dicts: custom episode metrics (rsl_rl < 5.0)
+        "extra_ep_info_buffer", # list of dicts: custom episode metrics (rsl_rl >= 5.0)
     )
 
 
@@ -513,6 +515,7 @@ class Investigator:
         self._num_learning_iterations: int | None = None
         self._half_dumped = False
         self._scalar_writer = None
+        self._prev_eval_actions: torch.Tensor | None = None
 
     # ---------------------------------------------------------
     # Installation
@@ -602,6 +605,7 @@ class Investigator:
                         "learn_time": kwargs.get("learn_time", 0),
                         "rewbuffer": getattr(logger, "rewbuffer", []),
                         "lenbuffer": getattr(logger, "lenbuffer", []),
+                        "extra_ep_info_buffer": getattr(logger, "extra_ep_info_buffer", []),
                     }
                     investigator._on_iteration(it, locs)
                     return original_log(it=it, **kwargs)
@@ -715,9 +719,26 @@ class Investigator:
                     if scalar is not None:
                         metrics[f"{prefix}{sub_k}"] = scalar
             else:
-                scalar = _to_scalar(val)
-                if scalar is not None:
-                    metrics[f"{prefix}{out_key}"] = scalar
+                seq = None
+                if not isinstance(val, (str, bytes, torch.Tensor, np.generic)):
+                    try:
+                        seq = list(val)
+                    except TypeError:
+                        pass
+                
+                if seq is not None and len(seq) > 0 and isinstance(seq[0], dict):
+                    gathered = {}
+                    for d in seq:
+                        for d_k, d_v in d.items():
+                            gathered.setdefault(d_k, []).append(d_v)
+                    for sub_k, sub_list in gathered.items():
+                        scalar = _to_scalar(sub_list)
+                        if scalar is not None:
+                            metrics[f"{prefix}{sub_k}"] = scalar
+                else:
+                    scalar = _to_scalar(val)
+                    if scalar is not None:
+                        metrics[f"{prefix}{out_key}"] = scalar
 
         if metrics:
             self._log_metrics(metrics, iteration)
@@ -793,11 +814,13 @@ class Investigator:
         for key in [
             "investigator/actor/feature_erank",
             "investigator/actor/feature_erank_fixed",
+            "investigator/critic/feature_erank",
             "investigator/gram/erank",
             "investigator/policy/jacobian_erank",
             "investigator/policy/jacobian_erank_sample_mean",
             "investigator/policy/jacobian_erank_sample_std",
             "investigator/actor/dead_neuron_frac",
+            "investigator/critic/dead_neuron_frac",
             "investigator/actor/preact_norm",
             "investigator/policy/action_mean_variance",
         ]:
@@ -832,6 +855,10 @@ class Investigator:
                     effective_rank(S_a, self.cfg.erank_eps)
                 metrics["investigator/actor/pca_rank_99"] = pca_rank(S_a, 0.99)
 
+                _S_norm = (S_a / S_a.sum()).cpu()
+                for _i in range(min(20, len(_S_norm))):
+                    metrics[f"investigator/actor/sv_{_i:02d}"] = _S_norm[_i].item()
+
                 neuron_stds = actor_feats.std(dim=0)
                 dead = (neuron_stds < self.cfg.dead_neuron_threshold).sum().item()
                 total = actor_feats.shape[1]
@@ -860,7 +887,7 @@ class Investigator:
                 metrics["investigator/actor/preact_norm"] = preact[0]
                 metrics["investigator/actor/preact_norm_std"] = preact[1]
 
-            # -- Policy variance --
+            # -- Policy variance + update magnitude --
             action_means = self._get_action_means(actor, obs)
             if action_means is not None:
                 action_var_per_dim = action_means.var(dim=0)
@@ -868,6 +895,28 @@ class Investigator:
                     action_var_per_dim.mean().item()
                 metrics["investigator/policy/action_mean_variance_std"] = \
                     action_var_per_dim.std().item()
+
+                action_means_cpu = action_means.detach().cpu()
+                if (self._prev_eval_actions is not None
+                        and action_means_cpu.shape == self._prev_eval_actions.shape):
+                    metrics["investigator/policy/update_magnitude"] = (
+                        (action_means_cpu - self._prev_eval_actions).abs().mean().item()
+                    )
+                self._prev_eval_actions = action_means_cpu
+
+            # -- Critic features --
+            critic = self._get_critic()
+            critic_feats = self._extract_penultimate_features(critic, obs)
+            if critic_feats is not None:
+                _, S_c, _ = torch.linalg.svd(critic_feats, full_matrices=False)
+                metrics["investigator/critic/feature_erank"] = \
+                    effective_rank(S_c, self.cfg.erank_eps)
+                metrics["investigator/critic/pca_rank_99"] = pca_rank(S_c, 0.99)
+                neuron_stds_c = critic_feats.std(dim=0)
+                dead_c = (neuron_stds_c < self.cfg.dead_neuron_threshold).sum().item()
+                total_c = critic_feats.shape[1]
+                metrics["investigator/critic/dead_neurons"] = dead_c
+                metrics["investigator/critic/dead_neuron_frac"] = dead_c / max(total_c, 1)
 
         self._log_metrics(metrics, iteration)
 
