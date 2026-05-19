@@ -57,3 +57,53 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_flat_ppo_cfg.yaml",
     },
 )
+
+gym.register(
+    id="Isaac-Velocity-Flat-H1-MLP-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.flat_env_cfg:H1FlatEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_architecture_cfg:H1FlatPPOMLPRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-H1-Simba-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.flat_env_cfg:H1FlatEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_architecture_cfg:H1FlatPPOSimbaRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-H1-LinOp-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.flat_env_cfg:H1FlatEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_architecture_cfg:H1FlatPPOLinOpRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-H1-PFO-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.flat_env_cfg:H1FlatEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_architecture_cfg:H1FlatPPOPfoRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-H1-Simba-PFO-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.flat_env_cfg:H1FlatEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_architecture_cfg:H1FlatPPOPfoSimbaRunnerCfg",
+    },
+)

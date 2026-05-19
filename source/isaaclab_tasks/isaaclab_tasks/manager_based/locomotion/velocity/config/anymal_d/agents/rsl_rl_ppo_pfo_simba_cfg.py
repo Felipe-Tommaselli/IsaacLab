@@ -5,55 +5,18 @@
 
 """Runner configs for Anymal-D + SimBa + Proximal Feature Optimization (PFO).
 
-Imports SimbaModel / RslRlSimbaModelCfg from the existing SimBa config to
-avoid any code duplication.
+Imports SimbaModel / RslRlSimbaModelCfg and RslRlPpoWithPfoCfg from the
+shared utils package to avoid code duplication.
 """
 
 from isaaclab.utils import configclass
-from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlMLPModelCfg
+
+from isaaclab_tasks.utils.rsl_rl.algorithms.ppo_pfo import RslRlPpoWithPfoCfg
+from isaaclab_tasks.utils.rsl_rl.models.simba import RslRlSimbaModelCfg
 
 from .rsl_rl_ppo_cfg import AnymalDFlatPPORunnerCfg
-from .rsl_rl_ppo_simba_cfg import AnymalDRoughPPORunnerCfg, RslRlSimbaModelCfg
-
-
-# ---------------------------------------------------------------------------
-# Algorithm config
-# ---------------------------------------------------------------------------
-
-
-@configclass
-class RslRlPpoWithPfoCfg(RslRlPpoAlgorithmCfg):
-    """PPO algorithm config extended with PFO regularisation parameters.
-
-    ``class_name`` points to the local PPOWithPFO subclass so that
-    rsl_rl's ``resolve_callable`` / ``construct_algorithm`` picks it up
-    without any modifications to the library.
-    """
-
-    class_name: str = (
-        "isaaclab_tasks.manager_based.locomotion.velocity"
-        ".config.anymal_d.agents.ppo_pfo.PPOWithPFO"
-    )
-
-    pfo_coef: float = 1.0
-    """PFO regularisation coefficient.
-
-    Moala et al. recommend the nearest power-of-10 that matches the
-    magnitude of the PPO surrogate loss.  For SimBa locomotion tasks
-    a good starting sweep is {0.1, 1.0, 10.0}.
-    """
-
-    pfo_all_layers: bool = False
-    """If True, regularise all residual-block outputs (SimBa) / hidden
-    layer outputs (MLP), not only the penultimate pre-activation.
-    Corresponds to the 'Regularize all pre-activations' ablation in the
-    paper.
-    """
-
-
-# ---------------------------------------------------------------------------
-# Runner configs
-# ---------------------------------------------------------------------------
+from .rsl_rl_ppo_simba_cfg import AnymalDRoughPPORunnerCfg
 
 
 @configclass
@@ -71,7 +34,6 @@ class AnymalDFlatPPOPfoSimbaRunnerCfg(AnymalDRoughPPORunnerCfg):
         self.max_iterations = 300
         self.experiment_name = "anymal_d_flat_simba_pfo"
 
-        # Actor: SimBa with empirical_normalization (obs_normalization=True)
         self.actor = RslRlSimbaModelCfg(
             hidden_dims=[128, 128, 128],
             activation="relu",
@@ -83,7 +45,6 @@ class AnymalDFlatPPOPfoSimbaRunnerCfg(AnymalDRoughPPORunnerCfg):
             simba_depth_scale=True,
         )
 
-        # Critic: SimBa with wider hidden dim (no distribution head)
         self.critic = RslRlSimbaModelCfg(
             hidden_dims=[128, 128, 128],
             activation="relu",
@@ -94,7 +55,6 @@ class AnymalDFlatPPOPfoSimbaRunnerCfg(AnymalDRoughPPORunnerCfg):
             simba_depth_scale=True,
         )
 
-        # Algorithm: PPO + PFO
         self.algorithm = RslRlPpoWithPfoCfg(
             value_loss_coef=1.0,
             use_clipped_value_loss=True,

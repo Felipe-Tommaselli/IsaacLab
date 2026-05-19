@@ -33,13 +33,15 @@ This avoids all index-tracking across the shuffled mini-batch generator.
 from __future__ import annotations
 
 import copy
-from itertools import chain
 
 import torch
 import torch.nn as nn
 from rsl_rl.algorithms.ppo import PPO
 
-from .rsl_rl_ppo_linop_cfg import _FactoredLinear
+from isaaclab.utils import configclass
+from isaaclab_rl.rsl_rl import RslRlPpoAlgorithmCfg
+
+from isaaclab_tasks.utils.rsl_rl.models.linop import _FactoredLinear
 
 
 # ---------------------------------------------------------------------------
@@ -183,9 +185,6 @@ class PPOWithPFO(PPO):
 
     def _get_actor_trunk(self) -> nn.Module:
         """Return the MLP/trunk inside the actor model."""
-        # SimbaModel stores it as actor.mlp; MLPModel does the same.
-        # Use self.actor (the active module in the forward path) rather than
-        # self._raw_actor, so hooks attach correctly even under torch.compile.
         return self.actor.mlp  # type: ignore[attr-defined]
 
     def _pfo_loss_single(
@@ -196,22 +195,14 @@ class PPOWithPFO(PPO):
         old_preact_mod: nn.Module,
         latent_batch: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute PFO loss for the penultimate layer.
-
-        latent_batch is captured during the PPO actor forward (with grad).
-        old_trunk is run with no_grad on the same latent.
-        """
-        # Old pre-activation (no grad needed)
+        """Compute PFO loss for the penultimate layer."""
         old_handle, old_cap = _register_preact_hook_only(old_preact_mod)
         with torch.no_grad():
             old_trunk(latent_batch.detach())
         old_handle.remove()
 
-        # Current pre-activation was already captured during PPO actor forward.
-        # Re-run trunk to capture it with gradient, using the latent already
-        # produced by the actor's normaliser (captured via hook).
         curr_handle, curr_cap = _register_preact_hook_only(preact_mod)
-        trunk(latent_batch)  # lightweight re-run through trunk only
+        trunk(latent_batch)
         curr_handle.remove()
 
         return self.pfo_coef * (curr_cap["preact"] - old_cap["preact"].detach()).pow(2).mean()
@@ -234,7 +225,6 @@ class PPOWithPFO(PPO):
         curr_handles = [b.register_forward_hook(_make_hook(curr_feats)) for b in trunk.blocks]  # type: ignore
         old_handles = [b.register_forward_hook(_make_hook(old_feats)) for b in old_trunk.blocks]  # type: ignore
 
-        # Also include post_ln input (penultimate pre-act)
         curr_preact_h, curr_preact_cap = _register_preact_hook_only(trunk.post_ln)       # type: ignore
         old_preact_h, old_preact_cap = _register_preact_hook_only(old_trunk.post_ln)     # type: ignore
 
@@ -247,7 +237,6 @@ class PPOWithPFO(PPO):
         curr_preact_h.remove()
         old_preact_h.remove()
 
-        # Add penultimate pre-act to feature lists
         curr_feats.append(curr_preact_cap["preact"])
         old_feats.append(old_preact_cap["preact"].detach())
 
@@ -256,8 +245,6 @@ class PPOWithPFO(PPO):
             (c - o.detach()).pow(2).mean()
             for c, o in zip(curr_feats, old_feats)
         )
-        # Normalize by number of hook sites so pfo_coef has the same
-        # effective scale regardless of single-layer vs all-layers mode.
         return self.pfo_coef * loss / max(num_sites, 1)  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
@@ -265,27 +252,17 @@ class PPOWithPFO(PPO):
     # ------------------------------------------------------------------
 
     def update(self) -> dict[str, float]:  # noqa: C901
-        """Full PPO update loop with PFO regularisation injected per mini-batch.
-
-        Faithfully replicates PPO.update() (adaptive LR, clipped value loss,
-        grad clipping) and adds ``pfo_loss`` to the total loss scalar before
-        backward().  Symmetry and RND extensions are preserved.
-        """
+        """Full PPO update loop with PFO regularisation injected per mini-batch."""
         if self.pfo_coef <= 0.0:
             return super().update()
 
         trunk = self._get_actor_trunk()
         _, preact_mod = _get_hook_targets(trunk)
-        # MLP needs forward hooks (output capture), SimBa uses pre-hooks
         _fwd_hook = not hasattr(trunk, "post_ln")
 
-        # Snapshot theta_old trunk ONCE before any gradient step (~2 MB for
-        # hidden_dim=128).  Only the trunk weights are copied; normaliser state
-        # lives in self.actor and is NOT copied (it's shared, read-only here).
         old_trunk = copy.deepcopy(trunk).eval()
         _, old_preact_mod = _get_hook_targets(old_trunk)
 
-        # ---- standard PPO accumulators ----
         mean_value_loss = 0.0
         mean_surrogate_loss = 0.0
         mean_entropy = 0.0
@@ -314,12 +291,6 @@ class PPOWithPFO(PPO):
             if self.symmetry:
                 self.symmetry.augment_batch(batch, original_batch_size)
 
-            # ----------------------------------------------------------
-            # Actor forward – we hook the trunk to capture the latent
-            # (post-normaliser input to trunk) AND the current preact.
-            # Both are captured during this single actor forward so we
-            # pay zero extra cost for PFO capture.
-            # ----------------------------------------------------------
             (h_latent, h_preact), cap = _register_capture_hooks(
                 trunk, preact_mod, use_forward_hook=_fwd_hook
             )
@@ -332,8 +303,8 @@ class PPOWithPFO(PPO):
             h_latent.remove()
             h_preact.remove()
 
-            latent_batch: torch.Tensor = cap["latent"]        # (B, D_latent) with grad
-            curr_preact: torch.Tensor = cap["preact"]         # (B, D_hidden) with grad
+            latent_batch: torch.Tensor = cap["latent"]
+            curr_preact: torch.Tensor = cap["preact"]
 
             actions_log_prob = self.actor.get_output_log_prob(batch.actions)
             values = self.critic(
@@ -344,9 +315,6 @@ class PPOWithPFO(PPO):
             )
             entropy = self.actor.output_entropy[:original_batch_size]
 
-            # ----------------------------------------------------------
-            # Adaptive KL learning-rate schedule (verbatim from PPO)
-            # ----------------------------------------------------------
             if self.desired_kl is not None and self.schedule == "adaptive":
                 with torch.inference_mode():
                     kl = self.actor.get_kl_divergence(batch.old_distribution_params, distribution_params)
@@ -366,9 +334,6 @@ class PPOWithPFO(PPO):
                     for param_group in self.optimizer.param_groups:
                         param_group["lr"] = self.learning_rate
 
-            # ----------------------------------------------------------
-            # Surrogate loss
-            # ----------------------------------------------------------
             ratio = torch.exp(actions_log_prob - torch.squeeze(batch.old_actions_log_prob))
             surrogate = -torch.squeeze(batch.advantages) * ratio
             surrogate_clipped = -torch.squeeze(batch.advantages) * torch.clamp(
@@ -376,9 +341,6 @@ class PPOWithPFO(PPO):
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
-            # ----------------------------------------------------------
-            # Value loss
-            # ----------------------------------------------------------
             if self.use_clipped_value_loss:
                 value_clipped = batch.values + (values - batch.values).clamp(
                     -self.clip_param, self.clip_param
@@ -390,16 +352,9 @@ class PPOWithPFO(PPO):
             else:
                 value_loss = (batch.returns - values).pow(2).mean()
 
-            # ----------------------------------------------------------
-            # PFO loss
-            # Old preact: run old_trunk on the SAME latent (detached) that
-            # the actor's normaliser already produced.  This is correct because
-            # the normaliser state at update() start == theta_old's normaliser.
-            # ----------------------------------------------------------
             if self.pfo_all_layers and hasattr(trunk, "blocks"):
                 pfo_loss = self._pfo_loss_all_layers_simba(trunk, old_trunk, latent_batch)
             else:
-                # Old preact
                 old_h, old_cap = _register_preact_hook_only(
                     old_preact_mod, use_forward_hook=_fwd_hook
                 )
@@ -409,9 +364,6 @@ class PPOWithPFO(PPO):
                 old_preact = old_cap["preact"].detach()
                 pfo_loss = self.pfo_coef * (curr_preact - old_preact).pow(2).mean()
 
-            # ----------------------------------------------------------
-            # Total loss
-            # ----------------------------------------------------------
             loss = (
                 surrogate_loss
                 + self.value_loss_coef * value_loss
@@ -419,23 +371,18 @@ class PPOWithPFO(PPO):
                 + pfo_loss
             )
 
-            # RND loss
             rnd_loss = (
                 self.rnd.compute_loss(batch.observations[:original_batch_size])
                 if self.rnd
                 else None
             )
 
-            # Symmetry loss
             symmetry_loss = None
             if self.symmetry:
                 symmetry_loss = self.symmetry.compute_loss(self.actor, batch, original_batch_size)
                 if self.symmetry.use_mirror_loss:
                     loss = loss + self.symmetry.mirror_loss_coeff * symmetry_loss
 
-            # ----------------------------------------------------------
-            # Backward + grad clipping + optimiser step
-            # ----------------------------------------------------------
             self.optimizer.zero_grad()
             loss.backward()
             if rnd_loss is not None:
@@ -451,9 +398,6 @@ class PPOWithPFO(PPO):
             if rnd_loss is not None:
                 self.rnd.optimizer.step()
 
-            # ----------------------------------------------------------
-            # Accumulate statistics
-            # ----------------------------------------------------------
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy.mean().item()
@@ -463,7 +407,6 @@ class PPOWithPFO(PPO):
             if mean_symmetry_loss is not None:
                 mean_symmetry_loss += symmetry_loss.item()
 
-        # ---- normalise ----
         num_updates = self.num_learning_epochs * self.num_mini_batches
         loss_dict = {
             "value": mean_value_loss / num_updates,
@@ -478,3 +421,35 @@ class PPOWithPFO(PPO):
 
         self.storage.clear()
         return loss_dict
+
+
+# ---------------------------------------------------------------------------
+# Config dataclass
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class RslRlPpoWithPfoCfg(RslRlPpoAlgorithmCfg):
+    """PPO algorithm config extended with PFO regularisation parameters.
+
+    ``class_name`` points to the shared PPOWithPFO subclass so that
+    rsl_rl's ``resolve_callable`` / ``construct_algorithm`` picks it up
+    without any modifications to the library.
+    """
+
+    class_name: str = "isaaclab_tasks.utils.rsl_rl.algorithms.ppo_pfo.PPOWithPFO"
+
+    pfo_coef: float = 1.0
+    """PFO regularisation coefficient.
+
+    Moala et al. recommend the nearest power-of-10 that matches the
+    magnitude of the PPO surrogate loss.  For SimBa locomotion tasks
+    a good starting sweep is {0.1, 1.0, 10.0}.
+    """
+
+    pfo_all_layers: bool = False
+    """If True, regularise all residual-block outputs (SimBa) / hidden
+    layer outputs (MLP), not only the penultimate pre-activation.
+    Corresponds to the 'Regularize all pre-activations' ablation in the
+    paper.
+    """
