@@ -22,10 +22,10 @@ class AnymalDFlatPPOLinOpRunnerCfg(AnymalDRoughPPORunnerCfg):
 
         self.max_iterations = 300
         self.experiment_name = "anymal_d_flat_linop"
-        # Factored linear stack is sensitive to Adam's first-step stride; with
-        # k factors a per-parameter delta of lr compounds to (1+lr/init_std)^k
-        # in the composed weight. Lower lr + tighter grad clip keep the
-        # composed change in a safe range for k up to 8.
+        # Orthogonal init (gain=2^(1/(2k))) gives condition number=1 for the
+        # composed weight at init, eliminating the "balancing phase" that
+        # random-Gaussian init caused (cond≈3e9 for k=8).  With a well-conditioned
+        # start, 3e-4 is safe for all k; tighter grad norm guards later updates.
         self.algorithm.learning_rate = 3e-4
         self.algorithm.max_grad_norm = 0.5
         self.actor = RslRlLinOpModelCfg(

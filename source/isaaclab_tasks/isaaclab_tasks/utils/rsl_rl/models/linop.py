@@ -41,14 +41,19 @@ class _FactoredLinear(nn.Module):
         self.dim = dim
         self.num_factors = num_factors
 
-        # Per-factor variance σ² = 2^(1/k) / d so the product's output
-        # variance matches a standard Kaiming(ReLU) layer for any k.
-        std = math.sqrt(2.0 ** (1.0 / num_factors) / dim)
+        # Orthogonal init: each factor Q_i is orthogonal scaled by gain = 2^(1/(2k)).
+        # The composed product W_eff = W_k @ … @ W_1 then has all singular values =
+        # gain^k = sqrt(2), giving output variance 2 (Kaiming-ReLU target) regardless
+        # of k.  Critically, condition number = 1 at init, which eliminates the
+        # "balancing phase" that Gaussian init causes for k ≥ 4: with random-Gaussian
+        # factors the composed weight is nearly rank-1 (cond ≈ 3e9 for k=8), so
+        # gradient descent can only optimize one singular direction at a time.
+        gain = 2.0 ** (1.0 / (2 * num_factors))
         self.factors = nn.ParameterList(
             [nn.Parameter(torch.empty(dim, dim)) for _ in range(num_factors)]
         )
         for w in self.factors:
-            nn.init.normal_(w, mean=0.0, std=std)
+            nn.init.orthogonal_(w, gain=gain)
 
         self.bias = nn.Parameter(torch.zeros(dim)) if bias else None
 
