@@ -605,6 +605,9 @@ class Investigator:
                         "learn_time": kwargs.get("learn_time", 0),
                         "rewbuffer": getattr(logger, "rewbuffer", []),
                         "lenbuffer": getattr(logger, "lenbuffer", []),
+                        # ep_infos may arrive as a kwarg (rsl_rl >= 5.0) or sit on the logger
+                        "ep_infos": (kwargs.get("ep_infos")
+                                     or getattr(logger, "ep_infos", [])),
                         "extra_ep_info_buffer": getattr(logger, "extra_ep_info_buffer", []),
                     }
                     investigator._on_iteration(it, locs)
