@@ -24,6 +24,56 @@ gym.register(
 
 
 gym.register(
+    id="Isaac-Velocity-Rough-H1-MLP-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.rough_env_cfg:H1RoughEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_rough_architecture_cfg:H1RoughPPOMLPRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Rough-H1-Simba-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.rough_env_cfg:H1RoughEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_rough_architecture_cfg:H1RoughPPOSimbaRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Rough-H1-LinOp-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.rough_env_cfg:H1RoughEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_rough_architecture_cfg:H1RoughPPOLinOpRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Rough-H1-PFO-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.rough_env_cfg:H1RoughEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_rough_architecture_cfg:H1RoughPPOPfoRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Rough-H1-Simba-PFO-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.rough_env_cfg:H1RoughEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_rough_architecture_cfg:H1RoughPPOPfoSimbaRunnerCfg",
+    },
+)
+
+gym.register(
     id="Isaac-Velocity-Rough-H1-Play-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
