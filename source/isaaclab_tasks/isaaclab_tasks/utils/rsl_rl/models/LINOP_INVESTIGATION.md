@@ -867,3 +867,51 @@ Immediate read:
 - `lr=1.5e-4` also has a strong active seed at reward `14.73`.
 - The baseline `lr=3e-4` arm is still showing the familiar stuck early signature.
 - This is the cleanest evidence so far that k=8 can be fixed at the optimization level rather than by lowering exploration.
+
+---
+
+## 2026-05-21 00:51 UTC final LR-ablation results
+
+Snapshot time: `2026-05-21 00:51:34 UTC` (`2026-05-20 21:51:34 America/Sao_Paulo`).
+
+All `linop8_lr_ablation_std1p0` workers are finished. No active RSL-RL train or Ray tuner processes were observed before extracting this table.
+
+### Per-seed final table
+
+| LR | Variant | Seed | W&B run ID | W&B URL | Temporary log | Final iter | Final reward | Action std | Episode length | Status |
+|---:|---|---:|---:|---|---:|---:|---:|---:|---:|---|
+| `7.5e-5` | `linop8_lr0p000075_std1p0` | `881905` | `k0idawyu` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/k0idawyu | `5040800030.log` | 1499/1500 | 16.07 | 0.56 | 987.12 | complete, strong |
+| `7.5e-5` | `linop8_lr0p000075_std1p0` | `904078` | `xo1tmbam` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/xo1tmbam | `6265300920.log` | 1499/1500 | 16.49 | 0.56 | 991.25 | complete, strong |
+| `7.5e-5` | `linop8_lr0p000075_std1p0` | `289390` | `38q4z7zb` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/38q4z7zb | `4005878431.log` | 1499/1500 | 16.48 | 0.56 | 990.30 | complete, strong |
+| `7.5e-5` | `linop8_lr0p000075_std1p0` | `310664` | `52p2iyx8` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/52p2iyx8 | `2383722606.log` | 1499/1500 | 16.55 | 0.56 | 995.50 | complete, strong |
+| `7.5e-5` | `linop8_lr0p000075_std1p0` | `825309` | `vvrygjah` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/vvrygjah | `1288519710.log` | 1499/1500 | 16.76 | 0.55 | 995.64 | complete, strong |
+| `1.5e-4` | `linop8_lr0p00015_std1p0` | `782099` | `j1hqwtxd` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/j1hqwtxd | `4397957072.log` | 1499/1500 | 15.88 | 0.58 | 1000.00 | complete, strong |
+| `1.5e-4` | `linop8_lr0p00015_std1p0` | `727311` | `4recetq9` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/4recetq9 | `8584734091.log` | 1079/1500 | 10.45 | 0.72 | 998.95 | runtime failure after recovery |
+| `1.5e-4` | `linop8_lr0p00015_std1p0` | `734681` | `w8nkvnz2` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/w8nkvnz2 | `6365166814.log` | 1499/1500 | 10.88 | 0.67 | 976.68 | complete, moderate |
+| `1.5e-4` | `linop8_lr0p00015_std1p0` | `539674` | `l9ezn9fp` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/l9ezn9fp | `4721859653.log` | 1499/1500 | 12.45 | 0.64 | 991.39 | complete, good |
+| `1.5e-4` | `linop8_lr0p00015_std1p0` | `340130` | `5xeuyly8` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/5xeuyly8 | `9305328103.log` | 1499/1500 | 13.11 | 0.63 | 972.91 | complete, good |
+| `3e-4` | `linop8_lr0p0003_std1p0` | `941490` | `v75x3wta` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/v75x3wta | `4262611115.log` | 1499/1500 | 12.85 | 0.64 | 969.44 | complete, recovered |
+| `3e-4` | `linop8_lr0p0003_std1p0` | `446381` | `z7knsxae` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/z7knsxae | `2651464216.log` | 1499/1500 | -0.78 | 0.83 | 26.05 | complete, stuck |
+| `3e-4` | `linop8_lr0p0003_std1p0` | `694605` | `7cwdipro` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/7cwdipro | `8393722053.log` | 1499/1500 | 7.39 | 0.73 | 950.11 | complete, partial |
+| `3e-4` | `linop8_lr0p0003_std1p0` | `127889` | `yse5naky` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/yse5naky | `2708125015.log` | 1499/1500 | 8.60 | 0.71 | 970.76 | complete, partial |
+| `3e-4` | `linop8_lr0p0003_std1p0` | `610348` | `yrg7yvqf` | https://wandb.ai/tommaselli/anymal_flat_v6/runs/yrg7yvqf | `5869218334.log` | 2/1500 | catastrophic negative | 1.00 | 67.54 | runtime failure |
+
+Failure detail:
+
+- `1.5e-4`, seed `727311`: `RuntimeError: normal expects all elements of std >= 0.0` after reaching reward `10.45`.
+- `3e-4`, seed `610348`: catastrophic reward at iter 2 followed by the same std runtime failure.
+
+### Aggregate readout
+
+| LR | Completed/usable seeds | Mean final reward | Qualitative result |
+|---:|---:|---:|---|
+| `7.5e-5` | 5/5 | 16.47 | robust fix; all seeds strong |
+| `1.5e-4` | 5/5 if counting failed-after-recovery seed, 4/5 strict completed | 12.55 including failed-after-recovery seed; 13.08 strict completed | viable but less robust than `7.5e-5` |
+| `3e-4` | 4/5 strict completed, 3/5 useful | dominated by one crash and one stuck seed | unstable baseline; confirms original failure mode |
+
+Conclusion:
+
+- The coworker suggestion was right: k=8 is primarily an optimization-scale problem, not just an exploration problem.
+- Scaling LR by `2/8` from the k=2 control (`3e-4 * 2/8 = 7.5e-5`) fixes k=8 robustly with `init_std=1.0`.
+- This is cleaner than lowering `init_std`: the `init_std` sweep remained seed-fragile, while `lr=7.5e-5` produced 5/5 strong k=8 seeds.
+- For the paper story, k=4 remains the paper-consistent sweet spot, while k=8 can be presented as a stress test that requires inverse-k LR scaling.
