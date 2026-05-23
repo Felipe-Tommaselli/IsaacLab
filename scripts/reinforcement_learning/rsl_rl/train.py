@@ -211,6 +211,46 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
+    # -- wandb run init (always-on, parallel to MLflow) --
+    # sync_tensorboard must be enabled before the RSL-RL runner creates its
+    # SummaryWriter, otherwise the normal training scalar stream is missed.
+    _wandb_run_started = False
+    _is_main_process = getattr(app_launcher, "global_rank", 0) == 0
+    if os.environ.get("WANDB_API_KEY") and _is_main_process:
+        try:
+            import wandb as _wandb
+            _wandb_tags = [args_cli.task]
+            if os.environ.get("ISAACRAY_SWEEP_ID"):
+                _wandb_tags.append(os.environ.get("ISAACRAY_SWEEP_ID"))
+            _wandb.init(
+                project=os.environ.get("WANDB_PROJECT") or None,
+                entity=os.environ.get("WANDB_ENTITY") or None,
+                name=os.environ.get("WANDB_NAME") or None,
+                group=(
+                    os.environ.get("ISAACRAY_WANDB_GROUP")
+                    or os.environ.get("WANDB_RUN_GROUP")
+                    or None
+                ),
+                tags=_wandb_tags,
+                sync_tensorboard=True,
+                reinit=True,
+            )
+            _wandb_run_started = True
+            try:
+                _wandb.config.update(
+                    {
+                        "env_cfg": env_cfg.to_dict(),
+                        "agent_cfg": agent_cfg.to_dict(),
+                        **({"git_commit": git_commit} if git_commit else {}),
+                    },
+                    allow_val_change=True,
+                )
+            except Exception as _e:
+                print(f"[WARNING] wandb config update failed: {_e}")
+            print(f"[INFO] wandb run started: {_wandb.run.url if _wandb.run else '?'}")
+        except Exception as _e:
+            print(f"[WARNING] wandb init failed: {_e}")
+
     # create runner from rsl-rl
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
@@ -269,29 +309,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print("[WARNING] Could not locate MLflow run by name; Investigator MLflow logging disabled.")
         except Exception as _e:
             print(f"[WARNING] MLflow attach failed: {_e}")
-
-    # -- wandb run init (always-on, parallel to MLflow) --
-    _wandb_run_started = False
-    if os.environ.get("WANDB_API_KEY"):
-        try:
-            import wandb as _wandb
-            _wandb_tags = [args_cli.task]
-            if os.environ.get("ISAACRAY_SWEEP_ID"):
-                _wandb_tags.append(os.environ.get("ISAACRAY_SWEEP_ID"))
-            _wandb.init(
-                project=os.environ.get("WANDB_PROJECT") or None,
-                entity=os.environ.get("WANDB_ENTITY") or None,
-                name=os.environ.get("WANDB_NAME") or None,
-                group=os.environ.get("ISAACRAY_WANDB_GROUP") or None,
-                tags=_wandb_tags,
-                reinit=True,
-            )
-            _wandb_run_started = True
-            if git_commit:
-                _wandb.config.update({"git_commit": git_commit})
-            print(f"[INFO] wandb run started: {_wandb.run.url if _wandb.run else '?'}")
-        except Exception as _e:
-            print(f"[WARNING] wandb init failed: {_e}")
 
     # -- Investigator setup (representation rank analysis) --
     _inv_backend = os.environ.get("ISAACRAY_INVESTIGATOR_BACKEND", "multi")

@@ -145,9 +145,9 @@ class InvestigatorCfg:
     # -- Cadence --
     log_interval: int = 100
     """Compute live representation metrics every N training iterations."""
-    checkpoint_interval: int = 500
+    checkpoint_interval: int = 1000
     """Compute expensive metrics (Gram, Jacobian, native plots) every N iterations."""
-    weight_rank_interval: int = 250
+    weight_rank_interval: int = 1000
     """Compute per-layer weight erank every N iterations."""
 
     # -- Eval observations --
@@ -360,13 +360,15 @@ class _WandbBackend:
                   subdir: str = "plots"):
         metrics[name] = _MediaMetric(wandb.Image(fig))
 
-    def flush(self, scalars: dict, media: dict, iteration: int):
+    def flush(self, scalars: dict, media: dict, total_env_steps: int):
         self._define_metrics()
         scalar_payload = _coerce_scalar_payload(scalars)
-        if scalar_payload:
-            wandb.log({**scalar_payload, "total_env_steps": iteration})
-        if media:
-            wandb.log({**media, "total_env_steps": iteration})
+        payload = {**scalar_payload, **media}
+        if payload:
+            wandb.log(
+                {**payload, "total_env_steps": total_env_steps},
+                step=total_env_steps,
+            )
 
     def log_summary(self, summary: dict):
         wandb.run.summary.update(_coerce_scalar_payload(summary))
