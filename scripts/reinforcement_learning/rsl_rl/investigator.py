@@ -315,6 +315,21 @@ def _coerce_scalar_payload(payload: dict) -> dict[str, float]:
             if (scalar := _normalize_scalar(v)) is not None}
 
 
+_TRAIN_METRIC_ALIASES = {
+    "investigator/train/mean_reward": "train/mean_reward",
+    "investigator/train/mean_episode_length": "train/mean_episode_length",
+    "investigator/train/collection_time": "train/collection_time",
+    "investigator/train/learn_time": "train/learn_time",
+}
+
+
+def _add_train_metric_aliases(metrics: dict[str, float]) -> None:
+    """Mirror selected investigator training metrics under canonical train/* names."""
+    for source, alias in _TRAIN_METRIC_ALIASES.items():
+        if source in metrics and alias not in metrics:
+            metrics[alias] = metrics[source]
+
+
 # ===================================================================
 # Backend adapters (wandb / mlflow)
 # ===================================================================
@@ -345,6 +360,8 @@ class _WandbBackend:
             wandb.define_metric("total_env_steps")
             wandb.define_metric("investigator/*",
                                 step_metric="total_env_steps")
+            wandb.define_metric("train/*",
+                                step_metric="total_env_steps")
             self._metrics_defined = True
         except Exception as e:
             warnings.warn(f"[Investigator] wandb metric definition failed: {e}")
@@ -365,10 +382,7 @@ class _WandbBackend:
         scalar_payload = _coerce_scalar_payload(scalars)
         payload = {**scalar_payload, **media}
         if payload:
-            wandb.log(
-                {**payload, "total_env_steps": total_env_steps},
-                step=total_env_steps,
-            )
+            wandb.log({**payload, "total_env_steps": total_env_steps})
 
     def log_summary(self, summary: dict):
         wandb.run.summary.update(_coerce_scalar_payload(summary))
@@ -700,12 +714,13 @@ class Investigator:
     # ---------------------------------------------------------
 
     def _log_locs_scalars(self, iteration: int, locs: dict):
-        """Extract scalar metrics from rsl_rl's learn() locals -> history.json.
+        """Extract scalar metrics from rsl_rl's learn() locals -> history.json and trackers.
 
         - float/int: logged as-is.
         - deque/list/tuple of numbers: reduced with mean (skip if empty).
         - dict: flattened one level (e.g. loss_dict['value_loss'] ->
           investigator/train/value_loss).
+        - selected training scalars are also mirrored to canonical train/* names.
         """
         prefix = "investigator/train/"
         # Map a couple of rsl_rl's buffer names to friendlier keys.
@@ -730,7 +745,7 @@ class Investigator:
                         seq = list(val)
                     except TypeError:
                         pass
-                
+
                 if seq is not None and len(seq) > 0 and isinstance(seq[0], dict):
                     gathered = {}
                     for d in seq:
@@ -746,6 +761,7 @@ class Investigator:
                         metrics[f"{prefix}{out_key}"] = scalar
 
         if metrics:
+            _add_train_metric_aliases(metrics)
             self._log_metrics(metrics, iteration)
 
     def _on_training_end(self):

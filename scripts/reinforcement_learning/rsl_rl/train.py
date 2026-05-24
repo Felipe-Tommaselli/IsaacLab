@@ -159,9 +159,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
-    # force wandb to save offline sync data in the mounted log_dir
+    # Keep W&B's local files outside the per-run TensorBoard directory. When
+    # tensorboard sync is enabled, nesting WANDB_DIR under log_dir can make W&B
+    # recursively follow its own sync files.
     os.makedirs(log_dir, exist_ok=True)
-    os.environ["WANDB_DIR"] = log_dir
+    wandb_dir = os.path.join(log_root_path, "wandb")
+    os.makedirs(wandb_dir, exist_ok=True)
+    os.environ["WANDB_DIR"] = wandb_dir
 
     # extract git commit hash for tracking
     try:
