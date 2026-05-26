@@ -97,6 +97,18 @@ from isaaclab.utils.io import dump_yaml
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
 import isaaclab_tasks  # noqa: F401
+
+# MyRelic locomotion task registration (optional — only present when the
+# /workspace/myrelic snapshot has been docker cp'd into the container).
+import os as _os, sys as _sys
+_myrelic_path = "/workspace/myrelic/relic"
+if _os.path.isdir(_myrelic_path) and _myrelic_path not in _sys.path:
+    _sys.path.insert(0, _myrelic_path)
+try:
+    import relic.tasks  # noqa: F401  # registers Isaac-Spot-Locomotion-*-v0
+except ImportError:
+    pass
+
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 

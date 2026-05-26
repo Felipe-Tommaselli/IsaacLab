@@ -35,7 +35,7 @@ class SpotFlatPPOMLPRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     num_steps_per_env = 24
     max_iterations = 3000
-    save_interval = 50
+    save_interval = 2000
     experiment_name = "spot_flat_mlp"
     store_code_state = False
     obs_groups = {"actor": ["policy"], "critic": ["policy"]}
