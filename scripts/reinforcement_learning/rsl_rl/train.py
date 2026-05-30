@@ -34,6 +34,11 @@ parser.add_argument("--export_io_descriptors", action="store_true", default=Fals
 parser.add_argument(
     "--ray-proc-id", "-rid", type=int, default=None, help="Automatically configured by Ray integration, otherwise None."
 )
+parser.add_argument(
+    "--investigator_checkpoint_interval", type=int, default=1000,
+    help="Investigator expensive-metrics checkpoint interval (iterations). "
+         "Default 1000; set lower (e.g. 500) for shorter runs needing more snapshots.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -328,8 +333,40 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # -- Investigator setup (representation rank analysis) --
     _inv_backend = os.environ.get("ISAACRAY_INVESTIGATOR_BACKEND", "multi")
-    investigator = Investigator(runner, cfg=InvestigatorCfg(backend=_inv_backend))
-    investigator.install(sort_fn=lambda obs: obs[:, 9:12].norm(dim=-1))
+    investigator = Investigator(runner, cfg=InvestigatorCfg(
+        backend=_inv_backend,
+        checkpoint_interval=args_cli.investigator_checkpoint_interval,
+    ))
+
+    # -- Auto-detect contact sensor for gait phase classification --
+    # Computes support_count = number of feet in contact per environment.
+    # Falls back gracefully (phase_fn=None) on non-quadruped tasks or missing sensor.
+    _phase_fn = None
+    try:
+        _scene = getattr(env.unwrapped, "scene", None)
+        if _scene is not None:
+            _sensor = _scene.sensors.get("contact_forces")
+            if _sensor is not None:
+                _foot_ids, _foot_names = _sensor.find_bodies(".*foot.*")
+                if _foot_ids:
+                    _foot_ids_t = torch.tensor(_foot_ids, device=env.unwrapped.device)
+
+                    def _phase_fn(env_inner, _ids=_foot_ids_t):
+                        _s = env_inner.unwrapped.scene.sensors["contact_forces"]
+                        # net_forces_w: (N, B, 3) — z-component per body
+                        fz = _s.data.net_forces_w[:, _ids, 2]  # (N, n_feet)
+                        return fz.gt(1.0).sum(dim=-1).long()   # support count [N]
+
+                    print(f"[INFO] Gait phase_fn ready: {len(_foot_ids)} foot bodies "
+                          f"({', '.join(_foot_names)}).")
+    except Exception as _pe:
+        print(f"[INFO] No contact_forces sensor / foot bodies detected — "
+              f"phase-conditioned rank logging disabled: {_pe}")
+
+    investigator.install(
+        sort_fn=lambda obs: obs[:, 9:12].norm(dim=-1),
+        phase_fn=_phase_fn,
+    )
 
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)

@@ -288,8 +288,18 @@ class PPOWithPFO(PPO):
                         batch.advantages.std() + 1e-8
                     )
 
-            if self.symmetry:
-                self.symmetry.augment_batch(batch, original_batch_size)
+            if self.symmetry and self.symmetry["use_data_augmentation"]:
+                data_augmentation_func = self.symmetry["data_augmentation_func"]
+                batch.observations, batch.actions = data_augmentation_func(
+                    env=self.symmetry["_env"],
+                    obs=batch.observations,
+                    actions=batch.actions,
+                )
+                num_aug = int(batch.observations.batch_size[0] / original_batch_size)
+                batch.old_actions_log_prob = batch.old_actions_log_prob.repeat(num_aug, 1)
+                batch.values = batch.values.repeat(num_aug, 1)
+                batch.advantages = batch.advantages.repeat(num_aug, 1)
+                batch.returns = batch.returns.repeat(num_aug, 1)
 
             (h_latent, h_preact), cap = _register_capture_hooks(
                 trunk, preact_mod, use_forward_hook=_fwd_hook
@@ -377,11 +387,27 @@ class PPOWithPFO(PPO):
                 else None
             )
 
-            symmetry_loss = None
             if self.symmetry:
-                symmetry_loss = self.symmetry.compute_loss(self.actor, batch, original_batch_size)
-                if self.symmetry.use_mirror_loss:
-                    loss = loss + self.symmetry.mirror_loss_coeff * symmetry_loss
+                if not self.symmetry["use_data_augmentation"]:
+                    data_augmentation_func = self.symmetry["data_augmentation_func"]
+                    batch.observations, _ = data_augmentation_func(
+                        obs=batch.observations, actions=None, env=self.symmetry["_env"]
+                    )
+
+                mean_actions = self.actor(batch.observations.detach().clone())
+                action_mean_orig = mean_actions[:original_batch_size]
+                _, actions_mean_symm = data_augmentation_func(
+                    obs=None, actions=action_mean_orig, env=self.symmetry["_env"]
+                )
+
+                mse_loss = torch.nn.MSELoss()
+                symmetry_loss = mse_loss(
+                    mean_actions[original_batch_size:], actions_mean_symm.detach()[original_batch_size:]
+                )
+                if self.symmetry["use_mirror_loss"]:
+                    loss = loss + self.symmetry["mirror_loss_coeff"] * symmetry_loss
+                else:
+                    symmetry_loss = symmetry_loss.detach()
 
             self.optimizer.zero_grad()
             loss.backward()

@@ -128,6 +128,28 @@ OBS_GROUPS = [
 
 
 # ===================================================================
+# Gait phase labels (quadruped support-count scheme)
+# ===================================================================
+
+# Map support-count (0–4 feet in contact) → semantic label
+SUPPORT_COUNT_TO_LABEL: dict[int, str] = {
+    0: "flight",
+    1: "swing_dominant",
+    2: "double_support",
+    3: "stance_dominant",
+    4: "full_stance",
+}
+
+# Aliases used as W&B key segments: alias → list of matching support counts (None = all)
+PHASE_ALIASES: dict[str, list[int] | None] = {
+    "pooled":         None,
+    "stance":         [3, 4],
+    "swing":          [0, 1],
+    "double_support": [2],
+}
+
+
+# ===================================================================
 # Configuration
 # ===================================================================
 
@@ -201,6 +223,14 @@ class InvestigatorCfg:
     """Rollout horizon per env per iteration (fallback if auto-detect fails)."""
     num_envs: int = 4096
     """Number of parallel environments (fallback if auto-detect fails)."""
+
+    # -- Gait phase-conditioned logging --
+    phase_log_enabled: bool = True
+    """Compute per-phase (stance/swing/double_support/pooled) rank metrics at each checkpoint.
+    Requires phase_fn to be passed to install(); silently skipped otherwise."""
+    min_samples_per_phase: int = 128
+    """Minimum number of env samples required to compute rank metrics for a phase.
+    Phases with fewer samples are logged as NaN-equivalent (valid_rank_eval=0)."""
 
     # -- Scrape from rsl_rl's learn() locals for post-hoc comparison --
     # Scalars (float/int) go as-is. Deques/lists are reduced with mean.
@@ -532,6 +562,10 @@ class Investigator:
         self._half_dumped = False
         self._scalar_writer = None
         self._prev_eval_actions: torch.Tensor | None = None
+        # CSV header-written flags (written once, then appended)
+        self._weight_csv_initialized: bool = False
+        self._phase_csv_initialized: bool = False
+        self._n_dof_logged: bool = False
 
     # ---------------------------------------------------------
     # Installation
@@ -948,14 +982,22 @@ class Investigator:
     def _compute_weight_ranks(self, iteration: int):
         metrics = {}
         layer_eranks_actor = []
+        total_steps = iteration * self._step_scale
 
         with torch.no_grad():
             for label, model in [("actor", self._get_actor())]:
-                for i, (name, layer) in enumerate(_find_linear_layers(model)):
+                all_layers = _find_linear_layers(model)
+                n_layers = len(all_layers)
+                for i, (name, layer) in enumerate(all_layers):
                     W = layer.weight
                     _, S, _ = torch.linalg.svd(W, full_matrices=False)
                     er = effective_rank(S, self.cfg.erank_eps)
+                    erank_frac = er / max(min(W.shape[0], W.shape[1]), 1)
+                    is_output = (i == n_layers - 1)
+                    is_factorized = hasattr(layer, "factors")
+
                     metrics[f"investigator/weights/{label}/layer_{i}_erank"] = er
+                    metrics[f"investigator/weights/{label}/layer_{i}_erank_frac"] = erank_frac
 
                     # Backup raw SVs for post-hoc histogram reconstruction
                     torch.save(S.cpu(), self._log_dir / f"spectra/weight_{label}_L{i}_sv_{iteration}.pt")
@@ -970,7 +1012,7 @@ class Investigator:
                             S.cpu().numpy(), iteration)
 
                     # Per-factor spectra for LinOP layers (Huh et al. Fig 14)
-                    if hasattr(layer, "factors"):
+                    if is_factorized:
                         for j, factor in enumerate(layer.factors):
                             _, S_f, _ = torch.linalg.svd(
                                 factor.detach(), full_matrices=False)
@@ -981,6 +1023,23 @@ class Investigator:
                                 torch.save(
                                     S_f.cpu(),
                                     self._log_dir / f"spectra/weight_{label}_L{i}_F{j}_sv_{iteration}.pt")
+
+                    # Append to layer_weight_rank_timeseries.csv
+                    if label == "actor":
+                        try:
+                            csv_path = self._log_dir / "layer_weight_rank_timeseries.csv"
+                            write_header = not self._weight_csv_initialized and not csv_path.exists()
+                            with open(csv_path, "a") as _f:
+                                if write_header:
+                                    _f.write("global_step,layer_index,layer_name,weight_shape,"
+                                             "weight_erank,weight_erank_frac,is_output_layer,is_factorized\n")
+                                    self._weight_csv_initialized = True
+                                _f.write(f"{total_steps},{i},{name},"
+                                         f'"{W.shape[0]}x{W.shape[1]}",'
+                                         f"{er:.6f},{erank_frac:.6f},"
+                                         f"{int(is_output)},{int(is_factorized)}\n")
+                        except Exception as _csv_e:
+                            warnings.warn(f"[Investigator] layer_weight_rank_timeseries.csv write failed: {_csv_e}")
 
         self._log_metrics(metrics, iteration)
 
@@ -1112,7 +1171,7 @@ class Investigator:
                         fig, iteration)
                     plt.close(fig)
 
-        # -- Phase-conditioned Jacobian --
+        # -- Phase-conditioned Jacobian (legacy per-integer-label path) --
         if self._phase_fn is not None and jac_er is not None:
             try:
                 phases = self._phase_fn(self.runner.env)[:self.cfg.jacobian_batch_size]
@@ -1126,6 +1185,13 @@ class Investigator:
                             metrics[f"investigator/policy/jacobian_erank_phase{p.item()}"] = er_p
             except Exception as e:
                 warnings.warn(f"[Investigator] Phase Jacobian failed: {e}")
+
+        # -- Full gait phase-conditioned metrics --
+        if self.cfg.phase_log_enabled and self._phase_fn is not None:
+            try:
+                self._compute_phase_metrics(iteration, metrics)
+            except Exception as e:
+                warnings.warn(f"[Investigator] Phase metrics failed: {e}")
 
         # Per-layer weight heatmap image
         if self.cfg.wandb_weight_heatmap and self._backend.is_active():
@@ -1287,6 +1353,144 @@ class Investigator:
             spectra,
             self._log_dir / f"spectra/{label}_spectra_{iteration}.pt"
         )
+
+    # ---------------------------------------------------------
+    # Gait phase-conditioned metrics
+    # ---------------------------------------------------------
+
+    def _get_n_dof(self) -> int | None:
+        """Return actor output dimension (= number of DoF)."""
+        actor = self._get_actor()
+        layers = _find_linear_layers(actor)
+        if layers:
+            return layers[-1][1].weight.shape[0]
+        return None
+
+    def _compute_phase_metrics(self, iteration: int, metrics: dict):
+        """Compute per-phase rank metrics using live observations filtered by gait phase.
+
+        Phases are determined by `self._phase_fn(env)` → support-count tensor [num_envs].
+        Live observations are re-queried (not the fixed eval set) so that the phase label
+        and the observation are consistent at the current checkpoint.
+        """
+        actor = self._get_actor()
+        total_steps = iteration * self._step_scale
+
+        # -- n_dof (logged once) --
+        if not self._n_dof_logged:
+            n_dof = self._get_n_dof()
+            if n_dof is not None:
+                metrics["investigator/robot/n_dof"] = float(n_dof)
+                self._n_dof_logged = True
+
+        # -- Live observations + phase labels --
+        live_obs = self._get_actor_obs().detach()         # [num_envs, obs_dim]
+        phases_all = self._phase_fn(self.runner.env).to(live_obs.device).long()   # [num_envs]
+
+        # -- Phase distribution fractions --
+        n_envs = phases_all.shape[0]
+        for cnt, lbl in SUPPORT_COUNT_TO_LABEL.items():
+            frac = (phases_all == cnt).float().mean().item()
+            metrics[f"investigator_phase/dist/frac_{lbl}"] = frac
+
+        # Collect per-alias results for CSV
+        phase_row_data: dict[str, dict] = {}
+
+        for alias, support_counts in PHASE_ALIASES.items():
+            if support_counts is None:
+                mask = torch.ones(n_envs, dtype=torch.bool, device=live_obs.device)
+            else:
+                mask = torch.zeros(n_envs, dtype=torch.bool, device=live_obs.device)
+                for sc in support_counts:
+                    mask |= (phases_all == sc)
+
+            n_samples = int(mask.sum().item())
+            metrics[f"investigator_phase/{alias}/sample_count"] = float(n_samples)
+            valid = int(n_samples >= self.cfg.min_samples_per_phase)
+            metrics[f"investigator_phase/{alias}/valid_rank_eval"] = float(valid)
+
+            row: dict = {
+                "global_step": total_steps, "phase": alias,
+                "sample_count": n_samples, "valid": valid,
+                "feature_erank": float("nan"), "pca_rank_99": float("nan"),
+                "gram_erank": float("nan"), "jacobian_erank": float("nan"),
+                "jacobian_local_erank_mean": float("nan"),
+                "jacobian_local_erank_std": float("nan"),
+                "jacobian_dof_gap": float("nan"),
+            }
+
+            if not valid:
+                phase_row_data[alias] = row
+                continue
+
+            phase_obs = live_obs[mask].to(self.device)
+
+            # Feature erank
+            with torch.no_grad():
+                feats = self._extract_penultimate_features(actor, phase_obs)
+                if feats is not None:
+                    _, S_f, _ = torch.linalg.svd(feats.cpu(), full_matrices=False)
+                    feat_er = effective_rank(S_f, self.cfg.erank_eps)
+                    feat_pca = pca_rank(S_f, 0.99)
+                    metrics[f"investigator_phase/{alias}/actor/feature_erank"] = feat_er
+                    metrics[f"investigator_phase/{alias}/actor/pca_rank_99"] = float(feat_pca)
+                    row["feature_erank"] = feat_er
+                    row["pca_rank_99"] = float(feat_pca)
+
+                # Gram erank on phase subset (cap at 512 to keep cost manageable)
+                gram_obs = phase_obs[:512]
+                gram_feats = self._extract_penultimate_features(actor, gram_obs)
+                if gram_feats is not None:
+                    gram = compute_gram_cosine(gram_feats)
+                    _, S_gram, _ = torch.linalg.svd(gram)
+                    gram_er = effective_rank(S_gram, self.cfg.erank_eps)
+                    metrics[f"investigator_phase/{alias}/gram/erank"] = gram_er
+                    row["gram_erank"] = gram_er
+
+            # Jacobian erank (cap at jacobian_batch_size)
+            jac_obs_phase = phase_obs[:self.cfg.jacobian_batch_size]
+            jac_er_p, _, _, _, jac_ps = self._compute_jacobian_erank(actor, jac_obs_phase)
+            if jac_er_p is not None:
+                metrics[f"investigator_phase/{alias}/policy/jacobian_erank"] = jac_er_p
+                row["jacobian_erank"] = jac_er_p
+                n_dof = self._get_n_dof()
+                if n_dof is not None:
+                    gap = float(n_dof) - jac_er_p
+                    metrics[f"investigator_phase/{alias}/policy/jacobian_dof_gap"] = gap
+                    row["jacobian_dof_gap"] = gap
+            if jac_ps is not None and len(jac_ps) > 0:
+                mean_er = jac_ps.mean().item()
+                std_er = jac_ps.std().item()
+                metrics[f"investigator_phase/{alias}/policy/jacobian_local_erank_mean"] = mean_er
+                metrics[f"investigator_phase/{alias}/policy/jacobian_local_erank_std"] = std_er
+                row["jacobian_local_erank_mean"] = mean_er
+                row["jacobian_local_erank_std"] = std_er
+
+            phase_row_data[alias] = row
+
+        # -- Append to phase_rank_timeseries.csv --
+        try:
+            csv_path = self._log_dir / "phase_rank_timeseries.csv"
+            write_header = not self._phase_csv_initialized and not csv_path.exists()
+            with open(csv_path, "a") as _f:
+                if write_header:
+                    _f.write("global_step,phase,sample_count,valid,"
+                             "feature_erank,pca_rank_99,gram_erank,"
+                             "jacobian_erank,jacobian_local_erank_mean,"
+                             "jacobian_local_erank_std,jacobian_dof_gap\n")
+                    self._phase_csv_initialized = True
+                for row in phase_row_data.values():
+                    _f.write(
+                        f"{row['global_step']},{row['phase']},"
+                        f"{row['sample_count']},{row['valid']},"
+                        f"{row['feature_erank']:.6f},{row['pca_rank_99']:.6f},"
+                        f"{row['gram_erank']:.6f},{row['jacobian_erank']:.6f},"
+                        f"{row['jacobian_local_erank_mean']:.6f},"
+                        f"{row['jacobian_local_erank_std']:.6f},"
+                        f"{row['jacobian_dof_gap']:.6f}\n"
+                    )
+        except Exception as _csv_e:
+            warnings.warn(f"[Investigator] phase_rank_timeseries.csv write failed: {_csv_e}")
 
     # ---------------------------------------------------------
     # Model access (rsl_rl >= 5.0: alg.actor / alg.critic directly)
