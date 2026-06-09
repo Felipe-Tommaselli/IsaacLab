@@ -2,7 +2,7 @@
 
 [![Watch the demo](mind_the_phase_thumb.png)](mind_the_phase.mp4)
 
-A research fork of [Isaac Lab](https://github.com/isaac-sim/IsaacLab). We left the simulator alone and built our Mind The Phase work on top of it, training every policy with `rsl_rl`.
+A research fork of [Isaac Lab](https://github.com/isaac-sim/IsaacLab) for the Mind The Phase paper. Both IsaacLab and `rsl_rl` are kept unchanged, just class-injected or monkey-patched externally. All artifacts can be added to any codebase for convenience. 
 
 ## 1. What lives in this fork
 
