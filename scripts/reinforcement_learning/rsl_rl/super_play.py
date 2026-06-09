@@ -43,6 +43,13 @@ parser.add_argument("--use_pretrained_checkpoint", action="store_true", help="Us
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 # -- super_play specific
 parser.add_argument("--command_speed", type=float, default=0.5, help="Forward/backward |v_x| command (m/s).")
+parser.add_argument(
+    "--profile",
+    choices=("review", "paper_walk"),
+    default="review",
+    help="Rollout command profile: review keeps the stance/forward/backward gait sequence; paper_walk records a short settle plus forward-walk shot.",
+)
+parser.add_argument("--settle_time", type=float, default=1.0, help="Initial standing duration for --profile paper_walk.")
 parser.add_argument("--stance_time", type=float, default=2.0, help="Standing phase duration (s).")
 parser.add_argument("--forward_time", type=float, default=5.0, help="Forward-walking phase duration (s).")
 parser.add_argument("--backward_time", type=float, default=5.0, help="Backward-walking phase duration (s).")
@@ -55,9 +62,20 @@ parser.add_argument("--camera_eye", type=str, default=None, help="Viewer camera 
 parser.add_argument("--camera_lookat", type=str, default=None, help="Viewer camera look-at point as 'x,y,z'.")
 parser.add_argument("--camera_resolution", type=str, default="1280,720", help="Viewer resolution as 'width,height'.")
 parser.add_argument(
+    "--camera_origin_type",
+    choices=("world", "env", "asset_root", "asset_body"),
+    default="asset_root",
+    help="Viewer camera frame. Use world for paper shots that show multiple environments.",
+)
+parser.add_argument("--camera_env_index", type=int, default=0, help="Viewer environment index for env/asset camera frames.")
+parser.add_argument("--camera_asset_name", type=str, default="robot", help="Viewer asset name for asset camera frames.")
+parser.add_argument("--camera_body_name", type=str, default=None, help="Viewer body name for asset_body camera frames.")
+parser.add_argument(
     "--nominal", action="store_true", default=False,
     help="Disable domain-randomization startup events (material/mass/com) for a clean single-robot match.",
 )
+parser.add_argument("--light_intensity", type=float, default=None, help="Intensity of the sky/dome light.")
+parser.add_argument("--light_color", type=str, default=None, help="Color of the sky/dome light as 'r,g,b'.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -207,10 +225,61 @@ def _configure_viewer(env_cfg, task: str):
         env_cfg.viewer.eye = eye
         env_cfg.viewer.lookat = lookat
         env_cfg.viewer.resolution = resolution
-        env_cfg.viewer.origin_type = "asset_root"
-        env_cfg.viewer.env_index = 0
-        env_cfg.viewer.asset_name = "robot"
-    print(f"[super_play] viewer eye={eye}, lookat={lookat}, resolution={resolution}")
+        env_cfg.viewer.origin_type = args_cli.camera_origin_type
+        env_cfg.viewer.env_index = args_cli.camera_env_index
+        env_cfg.viewer.asset_name = args_cli.camera_asset_name
+        env_cfg.viewer.body_name = args_cli.camera_body_name
+    print(
+        f"[super_play] viewer origin={args_cli.camera_origin_type}, eye={eye}, "
+        f"lookat={lookat}, resolution={resolution}"
+    )
+
+
+def _build_command_schedule(dt: float, speed: float):
+    """Return (total_steps, schedule_time, boundaries, commands) for the selected profile."""
+    if args_cli.profile == "paper_walk":
+        n_settle = int(round(args_cli.settle_time / dt))
+        n_forward = int(round(args_cli.forward_time / dt))
+        total_steps = n_settle + n_forward
+        return (
+            total_steps,
+            args_cli.settle_time + args_cli.forward_time,
+            [n_settle],
+            [
+                (0, 0.0),    # settle / standing
+                (1, speed),  # forward walk
+            ],
+        )
+
+    n_stance = int(round((3.0 * args_cli.stance_time) / dt))
+    n_forward = int(round(args_cli.forward_time / dt))
+    n_backward = int(round(args_cli.backward_time / dt))
+    total_steps = 5 * n_stance + 2 * n_forward + 2 * n_backward
+    return (
+        total_steps,
+        5 * 3.0 * args_cli.stance_time + 2 * args_cli.forward_time + 2 * args_cli.backward_time,
+        [
+            n_stance,
+            n_stance + n_forward,
+            2 * n_stance + n_forward,
+            2 * n_stance + 2 * n_forward,
+            3 * n_stance + 2 * n_forward,
+            3 * n_stance + 2 * n_forward + n_backward,
+            4 * n_stance + 2 * n_forward + n_backward,
+            4 * n_stance + 2 * n_forward + 2 * n_backward,
+        ],
+        [
+            (0,  0.0),    # standing
+            (1,  speed),  # forward
+            (0,  0.0),    # standing
+            (1,  speed),  # forward
+            (0,  0.0),    # standing
+            (2, -speed),  # backward
+            (0,  0.0),    # standing
+            (2, -speed),  # backward
+            (0,  0.0),    # standing (final)
+        ],
+    )
 
 
 def _disable_debug_visuals(obj) -> int:
@@ -327,7 +396,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     cmd.rel_standing_envs = 0.0
     cmd.rel_heading_envs = 0.0
     cmd.resampling_time_range = (1.0e9, 1.0e9)
-    schedule_time = args_cli.stance_time + args_cli.forward_time + args_cli.backward_time
+    speed = args_cli.command_speed
+
+    # Estimate schedule duration before env creation; exact step counts are computed after dt is known.
+    if args_cli.profile == "paper_walk":
+        schedule_time = args_cli.settle_time + args_cli.forward_time
+    else:
+        schedule_time = 15 * args_cli.stance_time + 2 * args_cli.forward_time + 2 * args_cli.backward_time
     if hasattr(env_cfg, "episode_length_s"):
         env_cfg.episode_length_s = schedule_time + 5.0
 
@@ -359,6 +434,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.video:
         _configure_viewer(env_cfg, args_cli.task)
 
+    # ---- configure sky/dome light overrides ----
+    if args_cli.light_intensity is not None:
+        if hasattr(env_cfg.scene, "sky_light") and env_cfg.scene.sky_light is not None:
+            env_cfg.scene.sky_light.spawn.intensity = args_cli.light_intensity
+            print(f"[super_play] override sky_light intensity to: {args_cli.light_intensity}")
+    if args_cli.light_color is not None:
+        color = _parse_tuple(args_cli.light_color, 3, float)
+        if color is not None and hasattr(env_cfg.scene, "sky_light") and env_cfg.scene.sky_light is not None:
+            env_cfg.scene.sky_light.spawn.color = color
+            print(f"[super_play] override sky_light color to: {color}")
+
     # ---- create env ----
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -367,11 +453,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ---- command schedule (steps) ----
     base_env_pre_wrap = env.unwrapped
     dt = base_env_pre_wrap.step_dt
-    n_stance = int(round(args_cli.stance_time / dt))
-    n_forward = int(round(args_cli.forward_time / dt))
-    n_backward = int(round(args_cli.backward_time / dt))
-    total_steps = n_stance + n_forward + n_backward
-    speed = args_cli.command_speed
+    total_steps, schedule_time, _SEG_BOUNDARIES, _SEG_CMDS = _build_command_schedule(dt, speed)
 
     if args_cli.video:
         video_dir = args_cli.video_dir or os.path.abspath(os.path.join("logs", "super_play", "videos"))
@@ -396,7 +478,45 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    runner.load(resume_path)
+    try:
+        runner.load(resume_path)
+    except KeyError as exc:
+        if exc.args != ("actor_state_dict",):
+            raise
+        loaded_dict = torch.load(resume_path, weights_only=False, map_location=agent_cfg.device)
+        old_state = loaded_dict.get("model_state_dict")
+        if old_state is None:
+            raise
+
+        def _remap_old_policy(prefix, target_state):
+            remapped = {}
+            for key in target_state:
+                if key in old_state:
+                    remapped[key] = old_state[key]
+                    continue
+                old_key = key
+                if key.startswith("mlp."):
+                    old_key = f"{prefix}.{key[4:]}"
+                elif key in ("distribution.std", "distribution.std_param"):
+                    old_key = "std"
+                if old_key in old_state:
+                    remapped[key] = old_state[old_key]
+            return remapped
+
+        actor_state = _remap_old_policy("actor", runner.alg.actor.state_dict())
+        critic_state = _remap_old_policy("critic", runner.alg.critic.state_dict())
+        if not actor_state or not critic_state:
+            raise
+        print(
+            "[super_play] remapped old model_state_dict checkpoint "
+            f"({len(actor_state)} actor tensors, {len(critic_state)} critic tensors)."
+        )
+        converted_dict = dict(loaded_dict)
+        converted_dict["actor_state_dict"] = actor_state
+        converted_dict["critic_state_dict"] = critic_state
+        load_iteration = runner.alg.load(converted_dict, None, strict=True)
+        if load_iteration:
+            runner.current_learning_iteration = converted_dict["iter"]
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     # ---- robot / sensor handles + profile resolution ----
@@ -445,19 +565,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[super_play] writing telemetry to: {out_path}")
 
     def _phase_and_cmd(step):
-        if step < n_stance:
-            return 0, 0.0
-        if step < n_stance + n_forward:
-            return 1, speed
-        return 2, -speed
+        for end, cmd in zip(_SEG_BOUNDARIES, _SEG_CMDS):
+            if step < end:
+                return cmd
+        return _SEG_CMDS[-1]
 
     cmd_term = base_env.command_manager.get_term("base_velocity")
     g = 9.81
 
     obs = env.get_observations()
     import math as _math
-    print(f"[super_play] rolling out {total_steps} steps ({schedule_time:.1f}s @ {1.0/dt:.0f} Hz), "
-          f"{num_envs} envs.")
+    print(
+        f"[super_play] profile={args_cli.profile}; rolling out {total_steps} steps "
+        f"({schedule_time:.1f}s @ {1.0/dt:.0f} Hz), {num_envs} envs."
+    )
 
     for step in range(total_steps):
         phase_id, vx = _phase_and_cmd(step)
@@ -510,7 +631,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "g": float(g),
         "num_envs": int(num_envs),
         "command_speed": float(speed),
-        "phase_boundaries": np.array([n_stance, n_stance + n_forward, total_steps], dtype=np.int64),
+        "profile": args_cli.profile,
+        "phase_boundaries": np.array(_SEG_BOUNDARIES + [total_steps], dtype=np.int64),
         "phase_labels": json.dumps({"0": "standing", "1": "forward", "2": "backward"}),
         "joint_names": json.dumps(list(robot.data.joint_names)),
         "foot_names": json.dumps(list(foot_names)),

@@ -1,141 +1,132 @@
-![Isaac Lab](docs/source/_static/isaaclab.jpg)
+# Mind The Phase (CORL 2026 Submission, under review)
+
+[![Watch the demo](mind_the_phase_thumb.png)](mind_the_phase.mp4)
+
+This fork is upstream [Isaac Lab](https://github.com/isaac-sim/IsaacLab) plus our research efforts on Mind The Phase. We use `rsl_rl` in all experiments.
 
 ---
 
-# Isaac Lab
+## 1. What lives in this fork
 
-[![IsaacSim](https://img.shields.io/badge/IsaacSim-5.1.0-silver.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
-[![Python](https://img.shields.io/badge/python-3.11-blue.svg)](https://docs.python.org/3/whatsnew/3.11.html)
-[![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/)
-[![Windows platform](https://img.shields.io/badge/platform-windows--64-orange.svg)](https://www.microsoft.com/en-us/)
-[![pre-commit](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/pre-commit.yaml?logo=pre-commit&logoColor=white&label=pre-commit&color=brightgreen)](https://github.com/isaac-sim/IsaacLab/actions/workflows/pre-commit.yaml)
-[![docs status](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/docs.yaml?label=docs&color=brightgreen)](https://github.com/isaac-sim/IsaacLab/actions/workflows/docs.yaml)
-[![License](https://img.shields.io/badge/license-BSD--3-yellow.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![License](https://img.shields.io/badge/license-Apache--2.0-yellow.svg)](https://opensource.org/license/apache-2-0)
+### 1.1 Architectures
 
+All architecture variants are RSL-RL (≥ 4.0) models/algorithms under [`source/isaaclab_tasks/isaaclab_tasks/utils/rsl_rl/`](source/isaaclab_tasks/isaaclab_tasks/utils/rsl_rl/):
 
-**Isaac Lab** is a GPU-accelerated, open-source framework designed to unify and simplify robotics research workflows,
-such as reinforcement learning, imitation learning, and motion planning. Built on [NVIDIA Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html),
-it combines fast and accurate physics and sensor simulation, making it an ideal choice for sim-to-real
-transfer in robotics.
+- **SimBa** (residual, normalized): [`utils/rsl_rl/models/simba.py`](source/isaaclab_tasks/isaaclab_tasks/utils/rsl_rl/models/simba.py).
+  In-house SimBa v1 adapted for PPO. See paper **Appendix A.1** for the exact block, init, and the depth-stable `α = 1/√N` branch scaling. Two integration modes: `SimbaModel` (subclasses RSL-RL `MLPModel`, swaps the trunk) and `SimbaActorCritic` (asymmetric actor/critic trunks).
 
-Isaac Lab provides developers with a range of essential features for accurate sensor simulation, such as RTX-based
-cameras, LIDAR, or contact sensors. The framework's GPU acceleration enables users to run complex simulations and
-computations faster, which is key for iterative processes like reinforcement learning and data-intensive tasks.
-Moreover, Isaac Lab can run locally or be distributed across the cloud, offering flexibility for large-scale deployments.
+- **MLP** (vanilla baseline): stock RSL-RL `MLPModel`.
+  The `*-MLP-v0` gym IDs (modern `actor`/`critic`/`obs_groups` shape), **not** the legacy `*-v0`.
 
-A detailed description of Isaac Lab can be found in our [arXiv paper](https://arxiv.org/abs/2511.04831).
+- **PFO** (Proximal Feature Optimization, Moalla et al.):[`utils/rsl_rl/algorithms/ppo_pfo.py`](source/isaaclab_tasks/isaaclab_tasks/utils/rsl_rl/algorithms/ppo_pfo.py).
+  Loss-term injection. Cfgs must set `self.algorithm = RslRlPpoWithPfoCfg(...)`, or `pfo_coef` is silently ignored (Hydra does not error on a missing field).
 
-## Key Features
+- **LinOp** (research experiment): [`utils/rsl_rl/models/linop.py`](source/isaaclab_tasks/isaaclab_tasks/utils/rsl_rl/models/linop.py), with design notes in [`LINOP_INVESTIGATION.md`](source/isaaclab_tasks/isaaclab_tasks/utils/rsl_rl/models/LINOP_INVESTIGATION.md).
+  Controlled via `agent.actor.linop_num_factors`.
 
-Isaac Lab offers a comprehensive set of tools and environments designed to facilitate robot learning:
+---
 
-- **Robots**: A diverse collection of robots, from manipulators, quadrupeds, to humanoids, with more than 16 commonly available models.
-- **Environments**: Ready-to-train implementations of more than 30 environments, which can be trained with popular reinforcement learning frameworks such as RSL RL, SKRL, RL Games, or Stable Baselines. We also support multi-agent reinforcement learning.
-- **Physics**: Rigid bodies, articulated systems, deformable objects
-- **Sensors**: RGB/depth/segmentation cameras, camera annotations, IMU, contact sensors, ray casters.
+## 2. The Investigator
 
+The Investigator quietly does the heavy lifting in Mind the Phase! Behind every rank figure in the paper (feature rank, Gram rank, weight rank, and the phase-conditioned policy-Jacobian rank of Figs. 3–8), all the data was processed by the Investigator. It is a **self-contained observability engine** that attaches to a live RSL-RL `OnPolicyRunner` **without modifying RSL-RL itself**, by monkey-patching at runtime.
 
-## Getting Started
+We currently vendor `MLflow` and, especially, `W&B` (Wandb). These are the two backends the Investigator can log to; we use both to leave redundancy in the logging pipeline.
 
-### Documentation
+Source: [`scripts/reinforcement_learning/rsl_rl/investigator.py`](scripts/reinforcement_learning/rsl_rl/investigator.py) (VERY large — please prefer the docstrings rather than the whole file).
 
-Our [documentation page](https://isaac-sim.github.io/IsaacLab) provides everything you need to get started, including
-detailed tutorials and step-by-step guides. Follow these links to learn more about:
+In [`train.py`](scripts/reinforcement_learning/rsl_rl/train.py) the entire integration is:
 
-- [Installation steps](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html#local-installation)
-- [Reinforcement learning](https://isaac-sim.github.io/IsaacLab/main/source/overview/reinforcement-learning/rl_existing_scripts.html)
-- [Tutorials](https://isaac-sim.github.io/IsaacLab/main/source/tutorials/index.html)
-- [Available environments](https://isaac-sim.github.io/IsaacLab/main/source/overview/environments.html)
-
-
-## Isaac Sim Version Dependency
-
-Isaac Lab is built on top of Isaac Sim and requires specific versions of Isaac Sim that are compatible with each
-release of Isaac Lab. Below, we outline the recent Isaac Lab releases and GitHub branches and their corresponding
-dependency versions for Isaac Sim.
-
-| Isaac Lab Version             | Isaac Sim Version         |
-| ----------------------------- | ------------------------- |
-| `main` branch                 | Isaac Sim 4.5 / 5.0 / 5.1 |
-| `v2.3.X`                      | Isaac Sim 4.5 / 5.0 / 5.1 |
-| `v2.2.X`                      | Isaac Sim 4.5 / 5.0       |
-| `v2.1.X`                      | Isaac Sim 4.5             |
-| `v2.0.X`                      | Isaac Sim 4.5             |
-
-
-## Contributing to Isaac Lab
-
-We wholeheartedly welcome contributions from the community to make this framework mature and useful for everyone.
-These may happen as bug reports, feature requests, or code contributions. For details, please check our
-[contribution guidelines](https://isaac-sim.github.io/IsaacLab/main/source/refs/contributing.html).
-
-## Show & Tell: Share Your Inspiration
-
-We encourage you to utilize our [Show & Tell](https://github.com/isaac-sim/IsaacLab/discussions/categories/show-and-tell)
-area in the `Discussions` section of this repository. This space is designed for you to:
-
-* Share the tutorials you've created
-* Showcase your learning content
-* Present exciting projects you've developed
-
-By sharing your work, you'll inspire others and contribute to the collective knowledge
-of our community. Your contributions can spark new ideas and collaborations, fostering
-innovation in robotics and simulation.
-
-## Troubleshooting
-
-Please see the [troubleshooting](https://isaac-sim.github.io/IsaacLab/main/source/refs/troubleshooting.html) section for
-common fixes or [submit an issue](https://github.com/isaac-sim/IsaacLab/issues).
-
-For issues related to Isaac Sim, we recommend checking its [documentation](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
-or opening a question on its [forums](https://forums.developer.nvidia.com/c/agx-autonomous-machines/isaac/67).
-
-## Support
-
-* Please use GitHub [Discussions](https://github.com/isaac-sim/IsaacLab/discussions) for discussing ideas,
-  asking questions, and requests for new features.
-* Github [Issues](https://github.com/isaac-sim/IsaacLab/issues) should only be used to track executable pieces of
-  work with a definite scope and a clear deliverable. These can be fixing bugs, documentation issues, new features,
-  or general updates.
-
-## Connect with the NVIDIA Omniverse Community
-
-Do you have a project or resource you'd like to share more widely? We'd love to hear from you!
-Reach out to the NVIDIA Omniverse Community team at OmniverseCommunity@nvidia.com to explore opportunities
-to spotlight your work.
-
-You can also join the conversation on the [Omniverse Discord](https://discord.com/invite/nvidiaomniverse) to
-connect with other developers, share your projects, and help grow a vibrant, collaborative ecosystem
-where creativity and technology intersect. Your contributions can make a meaningful impact on the Isaac Lab
-community and beyond!
-
-## License
-
-The Isaac Lab framework is released under [BSD-3 License](LICENSE). The `isaaclab_mimic` extension and its
-corresponding standalone scripts are released under [Apache 2.0](LICENSE-mimic). The license files of its
-dependencies and assets are present in the [`docs/licenses`](docs/licenses) directory.
-
-Note that Isaac Lab requires Isaac Sim, which includes components under proprietary licensing terms. Please see the [Isaac Sim license](docs/licenses/dependencies/isaacsim-license.txt) for information on Isaac Sim licensing.
-
-Note that the `isaaclab_mimic` extension requires cuRobo, which has proprietary licensing terms that can be found in [`docs/licenses/dependencies/cuRobo-license.txt`](docs/licenses/dependencies/cuRobo-license.txt).
-
-
-## Citation
-
-If you use Isaac Lab in your research, please cite the technical report:
-
-```
-@article{mittal2025isaaclab,
-  title={Isaac Lab: A GPU-Accelerated Simulation Framework for Multi-Modal Robot Learning},
-  author={Mayank Mittal and Pascal Roth and James Tigue and Antoine Richard and Octi Zhang and Peter Du and Antonio Serrano-Muñoz and Xinjie Yao and René Zurbrügg and Nikita Rudin and Lukasz Wawrzyniak and Milad Rakhsha and Alain Denzler and Eric Heiden and Ales Borovicka and Ossama Ahmed and Iretiayo Akinola and Abrar Anwar and Mark T. Carlson and Ji Yuan Feng and Animesh Garg and Renato Gasoto and Lionel Gulich and Yijie Guo and M. Gussert and Alex Hansen and Mihir Kulkarni and Chenran Li and Wei Liu and Viktor Makoviychuk and Grzegorz Malczyk and Hammad Mazhar and Masoud Moghani and Adithyavairavan Murali and Michael Noseworthy and Alexander Poddubny and Nathan Ratliff and Welf Rehberg and Clemens Schwarke and Ritvik Singh and James Latham Smith and Bingjie Tang and Ruchik Thaker and Matthew Trepte and Karl Van Wyk and Fangzhou Yu and Alex Millane and Vikram Ramasamy and Remo Steiner and Sangeeta Subramanian and Clemens Volk and CY Chen and Neel Jawale and Ashwin Varghese Kuruttukulam and Michael A. Lin and Ajay Mandlekar and Karsten Patzwaldt and John Welsh and Huihua Zhao and Fatima Anes and Jean-Francois Lafleche and Nicolas Moënne-Loccoz and Soowan Park and Rob Stepinski and Dirk Van Gelder and Chris Amevor and Jan Carius and Jumyung Chang and Anka He Chen and Pablo de Heras Ciechomski and Gilles Daviet and Mohammad Mohajerani and Julia von Muralt and Viktor Reutskyy and Michael Sauter and Simon Schirm and Eric L. Shi and Pierre Terdiman and Kenny Vilella and Tobias Widmer and Gordon Yeoman and Tiffany Chen and Sergey Grizan and Cathy Li and Lotus Li and Connor Smith and Rafael Wiltz and Kostas Alexis and Yan Chang and David Chu and Linxi "Jim" Fan and Farbod Farshidian and Ankur Handa and Spencer Huang and Marco Hutter and Yashraj Narang and Soha Pouya and Shiwei Sheng and Yuke Zhu and Miles Macklin and Adam Moravanszky and Philipp Reist and Yunrong Guo and David Hoeller and Gavriel State},
-  journal={arXiv preprint arXiv:2511.04831},
-  year={2025},
-  url={https://arxiv.org/abs/2511.04831}
-}
+```python
+investigator = Investigator(runner, cfg=InvestigatorCfg())
+investigator.install(sort_fn=lambda obs: obs[:, 9:12].norm(dim=-1))
+...
+runner.learn(...)                # runs as normal, now instrumented
+investigator.generate_report()   # post-hoc matplotlib report (supplement to W&B)
 ```
 
-## Acknowledgement
+`obs[:, 9:12]` is the commanded planar velocity `(vx, vy, ωz)` in the observation layout (base lin-vel `0:3`, ang-vel `3:6`, projected gravity `6:9`, command `9:12`; see paper **Appendix C.2 → Observation Space**). Its norm is used as a sort key so the fixed eval batch — and therefore the Gram/Jacobian matrices — is ordered by command magnitude, which is what makes the block structure in the Gram visualizations (Fig. 8) legible.
 
-Isaac Lab development initiated from the [Orbit](https://isaac-orbit.github.io/) framework.
-We gratefully acknowledge the authors of Orbit for their foundational contributions.
+### 2.1 How the patch works
+
+`Investigator.install()` (docstring at [`investigator.py:574`](scripts/reinforcement_learning/rsl_rl/investigator.py#L574)) does three things:
+
+1. Captures a fixed eval observation batch (`n_eval_obs`, default 2048) once, so every checkpoint's rank is measured on the same inputs and ranks are comparable across training time and across runs.
+2. Wraps `runner.learn()`. The wrapper detects the RSL-RL version and patches the right logging hook:
+   - RSL-RL **≥ 5.0**: patches `runner.logger.log(it, **kwargs)`.
+   - RSL-RL **< 5.0**: patches `runner.log(locs, ...)` directly.
+
+   In both cases it normalizes the call into a common `locs` dict, calls `investigator._on_iteration(it, locs)` to compute metrics, then delegates to the original logger and restores it in a `finally` (so a crash in analysis can never take down a training trial). This kind of redundancy shows up all around the code: since many runs are fired in parallel on our GPU cluster, several techniques were used to ensure robust telemetry and observability.
+3. **Hooks** the penultimate layer (`register_forward_hook`) to capture the feature matrix `Fθ(X)` for feature/Gram rank, and computes the policy Jacobian via `torch.func.jacrev + vmap`.
+
+> Note: the Investigator is pure observation and can be disabled with one cfg flag (`InvestigatorCfg.enabled = False`).
+
+### 2.2 What it measures (and the cfg knobs)
+
+All cadence/metric toggles live on `InvestigatorCfg` ([`investigator.py:157`](scripts/reinforcement_learning/rsl_rl/investigator.py#L157)):
+
+- **Feature rank & PCA-99 rank**: penultimate activations, entropy effective rank (paper Eq. 3).
+- **Gram rank**: cosine-similarity Gram of L2-normalized features, rows sorted by `sort_fn`.
+- **Weight rank**: per-layer effective rank of the actor's linear weights (`weight_rank_interval`).
+- **Policy-Jacobian effective rank**: `∂π/∂x` over a `jacobian_batch_size` subset; the central object of the paper.
+- **Phase-conditioned rank**: pass `phase_fn=lambda env: ...` to `install()` to label each env by gait phase (e.g. thresholded foot contact forces) and split swing/stance/double-support. This is what exposes the swing-dominant Δφ split (Fig. 3) that the global average washes out. Gated by `phase_log_enabled` / `min_samples_per_phase`; silently skipped if no `phase_fn` is supplied (as in the default `train.py` install above, which passes only `sort_fn`).
+
+More redundancy? Yes. Cheap live metrics run every `log_interval` (default 100 iters); expensive Gram/Jacobian/plots run every `checkpoint_interval` (default 1000). Metrics go to **W&B and/or MLflow** (`backend = "wandb" | "mlflow" | "multi"`), with local disk under `logs/.../investigator/` as backup, and `generate_report()` produces a post-hoc matplotlib supplement.
+
+---
+
+## 3. Infrastructure
+
+The experiments are produced by two repositories that are developed together but kept separate on purpose:
+
+| Repo | Role | Entry doc |
+|---|---|---|
+| **IsaacLab** (this repo, `isaacray-integration` branch) | Architectures (SimBa / LinOp / PFO / MLP), per-`(robot, terrain, architecture)` gym IDs + RunnerCfgs, the RSL-RL train script, and the **Investigator** rank analyzer. | this file |
+| **IsaacRay** (orchestration harness, **not yet open-sourced**) | Parallel hyperparameter sweeps: a Dockerized Ray Tune + MLflow + W&B stack that mounts this checkout and fans trials across a heterogeneous GPU cluster. | [`ISAACRAY.md`](ISAACRAY.md) |
+
+IsaacRay **does not vendor** IsaacLab. It bind-mounts this checkout into its training container and overlays its own `ray/` scripts; the only contract between them is that `ISAACLAB_PATH` points at a clone with `isaacray-integration` checked out. Without this branch the train script will not attach to MLflow/W&B runs and the Investigator is never installed. You do not need IsaacRay to reproduce a run, the train script is standalone; see [`ISAACRAY.md`](ISAACRAY.md) Section 4.
+
+```
+sweep.py launch-task spot_flat            (IsaacRay, host)
+   └─ Ray Tune driver (IsaacRay/ray/tuner.py, in container)
+        └─ one worker per GPU → subprocess:
+             scripts/reinforcement_learning/rsl_rl/train.py   (THIS repo)
+                ├─ builds the RSL-RL OnPolicyRunner over a velocity task
+                ├─ Investigator.install(...)  ← monkey-patches runner.learn()
+                └─ runner.learn()  → RSL-RL + rank metrics → MLflow / W&B
+```
+
+### 3.1 IsaacRay TL;DR
+
+IsaacRay turns "run this architecture × this terrain × N seeds" into one command. It is a three-container Docker stack (training + MLflow + TensorBoard) that schedules trials with Ray Tune across all visible GPUs and scales to a heterogeneous multi-node cluster via Ray custom-resource tags. The five paper sweep targets: `anymal_flat`, `anymal_rough`, `h1_flat`, `h1_rough`, `spot_flat`, each expand the same **10-variant grid** (3 MLP + 3 SimBa + 1 PFO+MLP + 1 PFO+SimBa + 2 LinOp) over 5 seeds = 50 trials/sweep. It is **not yet open-sourced**; how it drives this repo, and how to reproduce the same results **standalone without it**, is in [`ISAACRAY.md`](ISAACRAY.md).
+
+---
+
+## 4. Reproducing the paper
+
+You do not need IsaacRay, every trial is one `train.py` invocation. A single run:
+
+```bash
+# Spot flat, SimBa (2 blocks), seed 42 — one of the 50 spot_flat trials (Figs. 3, 5, 6, 7).
+python scripts/reinforcement_learning/rsl_rl/train.py \
+    --task Isaac-Velocity-Flat-Spot-Simba-v0 \
+    --headless --num_envs 4096 --name spot_flat_simba2_s42 \
+    agent.seed=42 agent.actor.simba_num_blocks=2 agent.max_iterations=2000
+
+# Vanilla MLP baseline for the architecture contrast:
+python scripts/reinforcement_learning/rsl_rl/train.py \
+    --task Isaac-Velocity-Flat-Spot-MLP-v0 \
+    --headless --num_envs 4096 --name spot_flat_mlp_s42 \
+    agent.seed=42 agent.max_iterations=2000
+```
+
+The full sweep is this command looped over the 10 architecture gym IDs × 5 seeds per `(robot, terrain)`; the gym-ID list and per-terrain iteration caps are in [`ISAACRAY.md`](ISAACRAY.md) Section 2 / [`CHANGES_FROM_UPSTREAM.md`](CHANGES_FROM_UPSTREAM.md) Section 3. The over-training/collapse run (Fig. 7) is the same command with `agent.algorithm.num_learning_epochs=10`; the LR study (Fig. 9, App. B.2) sweeps `agent.algorithm.learning_rate`.
+
+Rank/health metrics for every run are emitted by the Investigator to MLflow and/or W&B, with a local backup under `logs/rsl_rl/{name}/investigator/`. PPO/reward curves come from RSL-RL through the same channels.
+
+An anonymized snapshot of an earlier version is referenced in the paper (**Appendix B.1**): <https://anonymous.4open.science/r/IsaacLab-F6E2>.
+
+---
+
+## 5. Citation
+
+Mind the Phase is under review; cite the paper once a stable reference is available. Per upstream's request, also cite Isaac Lab itself ([`README.md` → Citation](README.md)) and SimBa (Lee et al., ICLR 2025).
